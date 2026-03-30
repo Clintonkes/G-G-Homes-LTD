@@ -1,0 +1,11 @@
+[Unit]
+Description=RentEase FastAPI Service
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/rentease
+ExecStart=/opt/rentease/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker main:app
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
