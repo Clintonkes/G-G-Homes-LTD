@@ -11,6 +11,8 @@ class PropertyService:
         neighbourhood: str | None = None,
         max_rent: float | None = None,
         property_type: str | None = None,
+        bedrooms: int | None = None,
+        min_bedrooms: int | None = None,
     ) -> list[Property]:
         stmt: Select = select(Property).where(
             Property.status == PropertyStatus.active,
@@ -22,6 +24,10 @@ class PropertyService:
             stmt = stmt.where(Property.annual_rent <= max_rent)
         if property_type:
             stmt = stmt.where(Property.property_type == property_type)
+        if bedrooms is not None:
+            stmt = stmt.where(Property.bedrooms == bedrooms)
+        if min_bedrooms is not None:
+            stmt = stmt.where(Property.bedrooms >= min_bedrooms)
         result = await db.execute(stmt.order_by(Property.created_at.desc()))
         return list(result.scalars().all())
 

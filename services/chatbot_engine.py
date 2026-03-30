@@ -37,15 +37,21 @@ class ChatbotEngine:
     def _normalize_text(self, value: str | None) -> str:
         return (value or "").strip().lower()
 
+    def _display_name(self, user: User) -> str | None:
+        name = (user.full_name or "").strip()
+        if not name or name.lower() in {"guest", "whatsapp user"}:
+            return None
+        return name
+
     def _infer_main_menu_intent(self, input_value: str | None) -> str | None:
         normalized = self._normalize_text(input_value)
         if not normalized:
             return None
         if input_value in {"search_property", "list_property", "my_account"}:
             return input_value
-        if any(term in normalized for term in ["find", "house", "home", "rent", "apartment", "flat", "property search"]):
+        if any(term in normalized for term in ["find", "search", "house", "home", "rent", "apartment", "flat", "property search", "looking for"]):
             return "search_property"
-        if any(term in normalized for term in ["list", "advertise", "post property", "upload property", "landlord"]):
+        if any(term in normalized for term in ["list", "enlist", "advertise", "post property", "upload property", "landlord", "register my property", "submit my property"]):
             return "list_property"
         if any(term in normalized for term in ["account", "profile", "my details", "my booking"]):
             return "my_account"
@@ -131,16 +137,47 @@ class ChatbotEngine:
         user = result.scalar_one_or_none()
         if user:
             return user
-        user = User(full_name="Guest", phone_number=phone, role=UserRole.tenant)
+        user = User(full_name="Valued Client", phone_number=phone, role=UserRole.tenant)
         db.add(user)
         await db.commit()
         await db.refresh(user)
         return user
 
+    async def _start_property_search(self, phone: str) -> None:
+        await self.clear_session(phone)
+        await self.set_state(phone, "SEARCH_LOCATION")
+        await whatsapp.send_text(phone, "Certainly. Which neighbourhood, area, or location would you like me to search for?")
+
+    async def _start_property_listing(self, phone: str, user: User) -> None:
+        await self.clear_session(phone)
+        await self.set_state(phone, "LIST_TITLE")
+        await self.set_data(phone, {"landlord_id": user.id})
+        await whatsapp.send_text(phone, "Absolutely. Let us get your property listed. Please share the property title you would like us to use.")
+
+    async def _send_search_results(self, phone: str, data: dict, db: AsyncSession) -> None:
+        properties = await property_service.search(
+            db,
+            neighbourhood=data.get("neighbourhood"),
+            max_rent=data.get("max_rent"),
+            property_type=data.get("property_type"),
+            bedrooms=data.get("bedrooms"),
+            min_bedrooms=data.get("min_bedrooms"),
+        )
+        data["result_ids"] = [prop.id for prop in properties]
+        await self.set_data(phone, data)
+        await self.set_state(phone, "VIEW_RESULTS")
+        if not properties:
+            await whatsapp.send_text(phone, "I could not find a verified listing that matches that search just now. If you would like, I can help you start a fresh search immediately.")
+            return
+        lines = [f"{index}. {prop.title} - {format_naira(prop.annual_rent)}" for index, prop in enumerate(properties, start=1)]
+        await whatsapp.send_text(phone, "Here are the available properties I found for you:\n" + "\n".join(lines) + "\n\nPlease reply with the number of the property you would like to view.")
+
     async def send_main_menu(self, phone: str, user: User) -> None:
         await self.set_state(phone, "MAIN_MENU")
+        name = self._display_name(user)
+        greeting_line = f"Welcome to G & G Homes Ltd, {name}." if name else "Welcome to G & G Homes Ltd."
         welcome_message = (
-            f"Welcome to G & G Homes Ltd, {user.full_name}. We are delighted to have you here and ready to assist you in real time.\n\n"
+            f"{greeting_line} We are delighted to receive you and it is our pleasure to assist you with prompt, professional support in real time.\n\n"
             "Here is what I can help you with today:\n"
             "1. Search available houses and rental properties\n"
             "2. Share property details, photos, videos, and inspection options\n"
@@ -167,6 +204,7 @@ class ChatbotEngine:
         state = await self.get_state(phone)
         input_value = button_id or (text.strip() if text else None)
         normalized = self._normalize_text(input_value)
+        intent = self._infer_main_menu_intent(input_value)
 
         if normalized in ["menu", "home", "start", "hi", "hello", "hey"]:
             await self.clear_session(phone)
@@ -178,11 +216,26 @@ class ChatbotEngine:
             await self.send_main_menu(phone, user)
             return
 
+        if intent == "search_property" and state not in {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}:
+            await self._start_property_search(phone)
+            return
+
+        if intent == "list_property" and not state.startswith("LIST_"):
+            await self._start_property_listing(phone, user)
+            return
+
+        if intent == "my_account" and state != "MAIN_MENU":
+            await self.clear_session(phone)
+            await whatsapp.send_text(phone, "I can help with account and booking support. Please tell me what you would like to check, and I will assist you from here.")
+            await self.send_main_menu(phone, user)
+            return
+
         handler_map = {
             "MAIN_MENU": self.handle_main_menu,
             "SEARCH_LOCATION": self.handle_search_location,
             "SEARCH_BUDGET": self.handle_search_budget,
             "SEARCH_TYPE": self.handle_search_type,
+            "SEARCH_BEDROOMS": self.handle_search_bedrooms,
             "VIEW_RESULTS": self.handle_view_results,
             "VIEW_PROPERTY": self.handle_view_property,
             "SCHEDULE_DATE": self.handle_schedule_date,
@@ -203,13 +256,10 @@ class ChatbotEngine:
     async def handle_main_menu(self, phone, input_value, _message_type, _media_id, user, _db):
         intent = self._infer_main_menu_intent(input_value)
         if intent == "search_property":
-            await self.set_state(phone, "SEARCH_LOCATION")
-            await whatsapp.send_text(phone, "Certainly. Which neighbourhood, area, or location would you like me to search for?")
+            await self._start_property_search(phone)
             return
         if intent == "list_property":
-            await self.set_state(phone, "LIST_TITLE")
-            await self.set_data(phone, {"landlord_id": user.id})
-            await whatsapp.send_text(phone, "Absolutely. Please share the property title you would like us to use for the listing.")
+            await self._start_property_listing(phone, user)
             return
         if intent == "my_account":
             await whatsapp.send_text(phone, "I can help with account and booking support. Please tell me what you would like to check, or choose an option below to continue.")
@@ -230,12 +280,16 @@ class ChatbotEngine:
                 {"id": "budget_100000", "title": "Up to 100k"},
                 {"id": "budget_250000", "title": "Up to 250k"},
                 {"id": "budget_500000", "title": "Up to 500k"},
+                {"id": "budget_flexible", "title": "More than 500k"},
             ],
         )
 
     async def handle_search_budget(self, phone, input_value, *_args):
         data = await self.get_data(phone)
-        data["max_rent"] = float((input_value or "budget_500000").split("_")[-1])
+        if input_value == "budget_flexible":
+            data["max_rent"] = None
+        else:
+            data["max_rent"] = float((input_value or "budget_500000").split("_")[-1])
         await self.set_data(phone, data)
         await self.set_state(phone, "SEARCH_TYPE")
         await whatsapp.send_list(
@@ -257,24 +311,41 @@ class ChatbotEngine:
     async def handle_search_type(self, phone, input_value, _message_type, _media_id, _user, db):
         data = await self.get_data(phone)
         data["property_type"] = input_value
-        properties = await property_service.search(
-            db,
-            neighbourhood=data.get("neighbourhood"),
-            max_rent=data.get("max_rent"),
-            property_type=input_value,
-        )
-        data["result_ids"] = [prop.id for prop in properties]
+        data.pop("bedrooms", None)
+        data.pop("min_bedrooms", None)
         await self.set_data(phone, data)
-        await self.set_state(phone, "VIEW_RESULTS")
-        if not properties:
-            await whatsapp.send_text(phone, "I could not find a verified listing that matches that search just now. If you would like, I can help you start a fresh search immediately.")
+        if input_value == "flat":
+            await self.set_state(phone, "SEARCH_BEDROOMS")
+            await whatsapp.send_buttons(
+                phone,
+                "Please choose the flat size you would like me to search for.",
+                [
+                    {"id": "search_beds_1", "title": "1 Bedroom"},
+                    {"id": "search_beds_2", "title": "2 Bedroom"},
+                    {"id": "search_beds_3", "title": "3 Bedroom"},
+                    {"id": "search_beds_4_plus", "title": "4+ Bedroom"},
+                ],
+            )
             return
-        lines = [f"{index}. {prop.title} - {format_naira(prop.annual_rent)}" for index, prop in enumerate(properties, start=1)]
-        await whatsapp.send_text(phone, "Here are the available properties I found for you:\n" + "\n".join(lines) + "\n\nPlease reply with the number of the property you would like to view.")
+        await self._send_search_results(phone, data, db)
+
+    async def handle_search_bedrooms(self, phone, input_value, _message_type, _media_id, _user, db):
+        data = await self.get_data(phone)
+        data.pop("bedrooms", None)
+        data.pop("min_bedrooms", None)
+        if input_value == "search_beds_4_plus":
+            data["min_bedrooms"] = 4
+        elif input_value and input_value.startswith("search_beds_"):
+            data["bedrooms"] = int(input_value.split("_")[-1])
+        else:
+            await whatsapp.send_text(phone, "Please choose the bedroom option that matches what you want, and I will continue the search for you.")
+            return
+        await self.set_data(phone, data)
+        await self._send_search_results(phone, data, db)
 
     async def handle_view_results(self, phone, input_value, _message_type, _media_id, _user, db):
         if not input_value or not input_value.isdigit():
-            await whatsapp.send_text(phone, "Please reply with the number of the property you would like me to open for you.")
+            await whatsapp.send_text(phone, "Please reply with the number of the property you would like me to open for you, or tell me if you would prefer to start a fresh search or list a property.")
             return
         data = await self.get_data(phone)
         result_ids = data.get("result_ids", [])
