@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    APP_NAME: str = "RentEase Nigeria"
+    APP_NAME: str = "G & G Homes Ltd"
     APP_ENV: str = "development"
     DEBUG: bool = True
     BASE_URL: str = "http://localhost:8000"
