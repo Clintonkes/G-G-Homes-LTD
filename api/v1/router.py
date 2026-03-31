@@ -1,3 +1,5 @@
+"""Top-level API router that groups and exposes all version 1 endpoint modules."""
+
 from fastapi import APIRouter
 
 from api.v1.endpoints import admin, appointments, payments, properties, users, webhook

@@ -1,3 +1,5 @@
+"""Database bootstrap logic that prepares initial application data such as the admin account."""
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 

@@ -1,3 +1,5 @@
+"""Reusable helper utilities for formatting values such as phone numbers and currency."""
+
 import re
 
 

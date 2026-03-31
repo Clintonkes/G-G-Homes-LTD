@@ -1,3 +1,5 @@
+"""Unit tests covering security helpers and selected service-layer behaviors."""
+
 from datetime import timedelta
 
 import pytest

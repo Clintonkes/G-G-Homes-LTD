@@ -1,3 +1,5 @@
+"""Central settings module that loads environment variables and shared application configuration."""
+
 from functools import lru_cache
 
 from pydantic import computed_field
@@ -14,13 +16,13 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     ALGORITHM: str = "HS256"
 
-    DATABASE_URL: str = "postgresql+asyncpg://postgres:JdcpRAFSSXPhiNONmtdobiIqTurRQhrZ@hopper.proxy.rlwy.net:57917/railway"
-    REDIS_URL: str = "redis://default:OAhuJJXiSzTHQGRoQvmitfNpnKafVXEN@redis.railway.internal:6379"
+    DATABASE_URL: str = "sqlite+aiosqlite:///./rentease.db"
+    REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_STATE_TTL_SECONDS: int = 3600
     REDIS_RESUME_TTL_SECONDS: int = 2592000
 
-    WHATSAPP_PHONE_NUMBER_ID: str = "1038728285994021"
-    WHATSAPP_ACCESS_TOKEN: str = "EAAM8cE1YjP0BRIo9Klbd3MRlOMj2bHp1HMrbRTIo1LpqxP609ZA52GeZBQCmnZCdlZBCXZBHy9JVvyvLTNlys62D6FYpdOTXp7b9UYqh4U1ZCcilkYt8fiNky5eveeStIhg6z9IOocOf47FNmF8duZBQJRSGFKG6eANhfI4SKXGcgNLPfXSucKbqkqWLELHaATdUr0gbYpfrZATHrpDZB3ZCOhVZB0211tD4N1TyfFuA077Xi4VVlSx9gI9teECzWmENZCV3sOCOSBFEOUkboE5AH34fDu0ABMJ1Rmj5ZAAZDZD"
+    WHATSAPP_PHONE_NUMBER_ID: str = "your_phone_number_id"
+    WHATSAPP_ACCESS_TOKEN: str = "your_whatsapp_access_token"
     WHATSAPP_VERIFY_TOKEN: str = "Rentease"
     WHATSAPP_API_VERSION: str = "v19.0"
 
@@ -34,6 +36,12 @@ class Settings(BaseSettings):
 
     ADMIN_EMAIL: str = "admin@rentease.ng"
     ADMIN_PASSWORD: str = "ChangeThisStrongPassword123!"
+
+    LLM_INTENT_ENABLED: bool = False
+    LLM_INTENT_API_URL: str = "https://api.openai.com/v1/chat/completions"
+    LLM_INTENT_API_KEY: str = ""
+    LLM_INTENT_MODEL: str = "gpt-4o-mini"
+    LLM_INTENT_TIMEOUT_SECONDS: int = 15
 
     TRANSACTION_FEE_PERCENT: float = 4.0
     BASIC_SUBSCRIPTION_MONTHLY: int = 1500

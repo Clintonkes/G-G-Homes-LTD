@@ -1,3 +1,5 @@
+"""Notification service for rent reminders and outbound tenant or landlord updates."""
+
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select

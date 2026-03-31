@@ -1,3 +1,5 @@
+"""Pydantic schemas used to validate API requests and structure API responses."""
+
 from datetime import datetime
 from typing import Any
 

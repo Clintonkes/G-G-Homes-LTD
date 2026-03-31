@@ -1,3 +1,5 @@
+"""Utility script for seeding local development data into the application database."""
+
 import asyncio
 
 from database.base import Base

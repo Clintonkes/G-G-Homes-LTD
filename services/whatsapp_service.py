@@ -1,3 +1,5 @@
+"""Wrapper around the WhatsApp Cloud API for sending messages, media, and interaction payloads."""
+
 import logging
 
 import httpx

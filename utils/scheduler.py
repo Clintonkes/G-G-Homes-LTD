@@ -1,3 +1,5 @@
+"""Scheduler configuration for timed background jobs such as reminders and subscription checks."""
+
 from collections.abc import Awaitable, Callable
 
 import pytz

@@ -1,3 +1,5 @@
+"""FastAPI dependency helpers for authenticated users, admin access, and shared request guards."""
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select

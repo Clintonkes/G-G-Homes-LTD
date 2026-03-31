@@ -1,3 +1,5 @@
+"""Payment orchestration service for initializing and verifying Paystack transactions."""
+
 from datetime import datetime, timedelta, timezone
 
 import httpx

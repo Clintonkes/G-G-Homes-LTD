@@ -1,3 +1,5 @@
+"""Integration tests covering API authentication, property, and webhook behavior."""
+
 import pytest
 
 from core.config import settings

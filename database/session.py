@@ -1,3 +1,5 @@
+"""Database and Redis connection management for async sessions and cached conversation state."""
+
 from collections.abc import AsyncGenerator
 
 from redis.asyncio import Redis

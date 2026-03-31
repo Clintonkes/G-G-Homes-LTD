@@ -1,3 +1,5 @@
+"""Security helpers for password hashing and token creation used across the platform."""
+
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 

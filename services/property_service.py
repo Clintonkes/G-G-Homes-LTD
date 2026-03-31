@@ -1,3 +1,5 @@
+"""Property querying service used to search and filter verified property listings."""
+
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 

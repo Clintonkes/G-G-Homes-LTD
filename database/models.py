@@ -1,3 +1,5 @@
+"""Database models that define the platform's users, properties, appointments, payments, and subscriptions."""
+
 import enum
 
 from sqlalchemy import JSON, Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, func

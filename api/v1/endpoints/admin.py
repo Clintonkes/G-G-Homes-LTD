@@ -1,3 +1,5 @@
+"""Administrative endpoints for platform health checks, dashboard reporting, and manual operations."""
+
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends

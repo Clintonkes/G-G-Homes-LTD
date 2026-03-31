@@ -1,3 +1,5 @@
+"""Payment endpoints for callbacks, remittance tracking, and webhook processing."""
+
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request

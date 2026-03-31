@@ -1,3 +1,5 @@
+"""Webhook endpoints that receive and validate incoming WhatsApp platform events."""
+
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request

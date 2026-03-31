@@ -1,3 +1,5 @@
+"""Application entrypoint for G & G Homes Ltd, including startup tasks, middleware, and API router registration."""
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI

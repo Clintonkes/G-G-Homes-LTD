@@ -1,3 +1,5 @@
+"""Shared pytest fixtures for database sessions, clients, and sample data used by the test suite."""
+
 import asyncio
 from collections.abc import AsyncGenerator
 

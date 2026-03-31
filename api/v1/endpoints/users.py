@@ -1,3 +1,5 @@
+"""User and authentication endpoints for account creation and login."""
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

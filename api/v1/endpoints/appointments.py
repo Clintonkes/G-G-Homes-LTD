@@ -1,3 +1,5 @@
+"""Appointment endpoints for creating, updating, and reviewing inspection schedules."""
+
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
