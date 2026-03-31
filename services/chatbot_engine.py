@@ -9,19 +9,21 @@ from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from database.models import Appointment, AppointmentStatus, Property, PropertyStatus, PropertyType, User, UserRole
 from services.intent_service import intent_service
 from services.media_service import media_service
 from services.property_service import property_service
 from services.whatsapp_service import whatsapp
-from utils.helpers import format_naira, format_phone_number
+from utils.helpers import format_naira, format_phone_number, parse_naira_amount
 
 STATE_KEY_PREFIX = "state:"
 DATA_KEY_PREFIX = "data:"
 RESUME_KEY_PREFIX = "resume:"
 RESUME_PROMPT_STATE = "RESUME_PROMPT"
+LIST_BEDROOMS_CUSTOM_STATE = "LIST_BEDROOMS_CUSTOM"
 SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
-LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_TYPE", "LIST_BEDROOMS", "LIST_RENT", "LIST_AMENITIES", "LIST_PHOTOS"}
+LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_PHOTOS"}
 
 
 class ChatbotEngine:
@@ -29,7 +31,7 @@ class ChatbotEngine:
 
     def __init__(self, redis_client) -> None:
         self.redis = redis_client
-        digest = hashlib.sha256(b"gghomes-session-key").digest()
+        digest = hashlib.sha256(settings.SECRET_KEY.encode("utf-8")).digest()
         self.cipher = Fernet(base64.urlsafe_b64encode(digest))
 
     def _state_key(self, phone: str) -> str:
@@ -59,11 +61,16 @@ class ChatbotEngine:
         greetings = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening", "good day"]
         return any(normalized.startswith(greeting) for greeting in greetings)
 
+    def _is_clarification_request(self, input_value: str | None) -> bool:
+        normalized = self._normalize_text(input_value)
+        prompts = ["what do you mean", "what are amenities", "which amenities", "example", "examples", "help", "explain"]
+        return normalized.endswith("?") or any(prompt in normalized for prompt in prompts)
+
     async def _write_active_state(self, phone: str, state: str) -> None:
-        await self.redis.set(self._state_key(phone), state, ex=3600)
+        await self.redis.set(self._state_key(phone), state, ex=settings.REDIS_STATE_TTL_SECONDS)
 
     async def _write_active_data(self, phone: str, data: dict) -> None:
-        await self.redis.set(self._data_key(phone), json.dumps(data), ex=3600)
+        await self.redis.set(self._data_key(phone), json.dumps(data), ex=settings.REDIS_STATE_TTL_SECONDS)
 
     async def _save_resume_snapshot(self, phone: str, state: str, data: dict) -> None:
         payload = {
@@ -73,7 +80,7 @@ class ChatbotEngine:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         token = self.cipher.encrypt(json.dumps(payload).encode("utf-8")).decode("utf-8")
-        await self.redis.set(self._resume_key(phone), token, ex=2592000)
+        await self.redis.set(self._resume_key(phone), token, ex=settings.REDIS_RESUME_TTL_SECONDS)
 
     async def _load_resume_snapshot(self, phone: str) -> tuple[str | None, dict]:
         token = await self.redis.get(self._resume_key(phone))
@@ -184,6 +191,22 @@ class ChatbotEngine:
             }],
         )
 
+    async def _send_listing_bedroom_options(self, phone: str) -> None:
+        await whatsapp.send_list(
+            phone,
+            "How many bedrooms does the property have?",
+            "Choose Bedrooms",
+            [{
+                "title": "Bedroom Options",
+                "rows": [
+                    {"id": "list_beds_1", "title": "1 Bedroom"},
+                    {"id": "list_beds_2", "title": "2 Bedroom"},
+                    {"id": "list_beds_3", "title": "3 Bedroom"},
+                    {"id": "list_beds_4_plus", "title": "4+ Bedroom"},
+                ],
+            }],
+        )
+
     async def _send_search_results(self, phone: str, data: dict, db: AsyncSession) -> None:
         properties = await property_service.search(
             db,
@@ -259,9 +282,11 @@ class ChatbotEngine:
                 [{"title": "Property Types", "rows": [{"id": item.value, "title": item.value.replace("_", " ").title()} for item in PropertyType]}],
             )
         elif state == "LIST_BEDROOMS":
-            await whatsapp.send_buttons(phone, "How many bedrooms does the property have?", [{"id": f"beds_{i}", "title": f"{i} Bedroom"} for i in (1, 2, 3)])
+            await self._send_listing_bedroom_options(phone)
+        elif state == LIST_BEDROOMS_CUSTOM_STATE:
+            await whatsapp.send_text(phone, "Please enter the exact number of bedrooms for this property, for example 4, 5, or 6.")
         elif state == "LIST_RENT":
-            await whatsapp.send_text(phone, "Please enter the annual rent amount in naira.")
+            await whatsapp.send_text(phone, "Please enter the annual rent amount in naira. You can write it as 500000 or 500,000.")
         elif state == "LIST_AMENITIES":
             await whatsapp.send_text(phone, "Please list the amenities, separated by commas.")
         elif state == "LIST_PHOTOS":
@@ -354,6 +379,7 @@ class ChatbotEngine:
             "LIST_NEIGHBOURHOOD": self.handle_list_neighbourhood,
             "LIST_TYPE": self.handle_list_type,
             "LIST_BEDROOMS": self.handle_list_bedrooms,
+            LIST_BEDROOMS_CUSTOM_STATE: self.handle_list_bedrooms_custom,
             "LIST_RENT": self.handle_list_rent,
             "LIST_AMENITIES": self.handle_list_amenities,
             "LIST_PHOTOS": self.handle_list_photos,
@@ -366,9 +392,9 @@ class ChatbotEngine:
         if input_value == "resume_previous":
             target_state = data.get("resume_target_state", "MAIN_MENU")
             target_data = data.get("resume_target_data", {})
-            await self._write_active_data(phone, json.dumps(target_data) if False else target_data)
-            await self.set_data(phone, target_data)
-            await self.set_state(phone, target_state)
+            await self._write_active_data(phone, target_data)
+            await self._write_active_state(phone, target_state)
+            await self._save_resume_snapshot(phone, target_state, target_data)
             await whatsapp.send_text(phone, "Welcome back. We are continuing from where we stopped.")
             await self._prompt_for_state(phone, target_state, target_data, db)
             return
@@ -554,23 +580,52 @@ class ChatbotEngine:
         data["property_type"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_BEDROOMS")
-        await whatsapp.send_buttons(phone, "How many bedrooms does the property have?", [{"id": f"beds_{i}", "title": f"{i} Bedroom"} for i in (1, 2, 3)])
+        await self._send_listing_bedroom_options(phone)
 
     async def handle_list_bedrooms(self, phone, input_value, *_args):
         data = await self.get_data(phone)
-        data["bedrooms"] = int((input_value or "beds_1").split("_")[-1])
+        if input_value == "list_beds_4_plus":
+            await self.set_state(phone, LIST_BEDROOMS_CUSTOM_STATE)
+            await whatsapp.send_text(phone, "Please enter the exact number of bedrooms for this property, for example 4, 5, or 6.")
+            return
+        if not input_value or not input_value.startswith("list_beds_"):
+            await self._send_listing_bedroom_options(phone)
+            return
+        data["bedrooms"] = int(input_value.split("_")[-1])
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_RENT")
-        await whatsapp.send_text(phone, "Please enter the annual rent amount in naira.")
+        await whatsapp.send_text(phone, "Please enter the annual rent amount in naira. You can write it as 500000 or 500,000.")
+
+    async def handle_list_bedrooms_custom(self, phone, input_value, *_args):
+        try:
+            bedrooms = int((input_value or "").strip())
+            if bedrooms < 4:
+                raise ValueError
+        except (TypeError, ValueError):
+            await whatsapp.send_text(phone, "Please enter a valid bedroom number such as 4, 5, or 6.")
+            return
+        data = await self.get_data(phone)
+        data["bedrooms"] = bedrooms
+        await self.set_data(phone, data)
+        await self.set_state(phone, "LIST_RENT")
+        await whatsapp.send_text(phone, "Please enter the annual rent amount in naira. You can write it as 500000 or 500,000.")
 
     async def handle_list_rent(self, phone, input_value, *_args):
+        try:
+            annual_rent = parse_naira_amount(input_value or "")
+        except ValueError:
+            await whatsapp.send_text(phone, "Please enter the annual rent in a valid format such as 500000 or 500,000.")
+            return
         data = await self.get_data(phone)
-        data["annual_rent"] = float(input_value)
+        data["annual_rent"] = annual_rent
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_AMENITIES")
         await whatsapp.send_text(phone, "Please list the amenities, separated by commas.")
 
     async def handle_list_amenities(self, phone, input_value, *_args):
+        if self._is_clarification_request(input_value):
+            await whatsapp.send_text(phone, "Amenities are the useful features that come with the property, such as water supply, prepaid meter, POP finishing, fenced compound, parking space, security, or wardrobes. Please list the available amenities, separated by commas.")
+            return
         data = await self.get_data(phone)
         data["amenities"] = [item.strip() for item in input_value.split(",") if item.strip()]
         data["photo_urls"] = []
