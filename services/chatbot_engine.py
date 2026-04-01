@@ -56,18 +56,46 @@ class ChatbotEngine:
         normalized = self._normalize_text(input_value)
         if not normalized:
             return False
-        # Extended recognition for "done" command variations
+        # Strip punctuation and common suffixes for better matching
+        cleaned = normalized.rstrip("!?. ,")
+        # Exact matches - comprehensive set
         done_patterns = {
             "done", "finished", "i am done", "that is all", "that's all", "complete",
-            "done sendin", "sent all", "all sent", "done with photos", "done for now",
-            "finis", "all pictures sent", "completed", "done uploading", "no more"
+            "done sending", "done sendin", "sent all", "all sent", "done with photos",
+            "done for now", "finis", "all pictures sent", "completed", "done uploading",
+            "no more", "thats all", "i'm done", "im done", "that will be all",
+            "ive sent all", "i've sent all", "enough", "thats enough", "that's enough",
+            "yes done", "yes im done", "proceed", "go ahead", "next", "move on",
+            "continue", "we are done", "we're done", "we done", "thats it",
+            "that's it", "nothing more", "no more photos", "no more pics",
+            "no more pictures", "no more images", "no more videos",
         }
-        if normalized in done_patterns:
+        if cleaned in done_patterns:
             return True
-        # Check for presence of "done" in common phrases
-        if any(phrase in normalized for phrase in ["done now", "done with", "already done"]):
+        # Check for presence of key phrases in longer messages
+        done_phrases = [
+            "done now", "done with", "already done", "i am done", "i'm done",
+            "im done", "done sending", "sent everything", "all done",
+            "finished sending", "go ahead", "move on", "proceed now",
+            "that should be", "nothing else", "you can proceed",
+            "please proceed", "continue to", "go to the next",
+        ]
+        if any(phrase in cleaned for phrase in done_phrases):
             return True
         return False
+
+    def _is_continue_signal(self, input_value: str | None) -> bool:
+        """Detect short affirmative or progress signals like 'yes', 'ok', 'continue'."""
+        normalized = self._normalize_text(input_value)
+        if not normalized:
+            return False
+        cleaned = normalized.rstrip("!?. ,")
+        signals = {
+            "yes", "ok", "okay", "sure", "continue", "proceed", "next",
+            "go ahead", "move on", "go on", "yeah", "yep", "yup", "alright",
+            "fine", "go", "forward", "ahead",
+        }
+        return cleaned in signals
 
     def _is_greeting(self, input_value: str | None) -> bool:
         normalized = self._normalize_text(input_value)
@@ -701,55 +729,80 @@ class ChatbotEngine:
 
     async def handle_list_photos(self, phone, input_value, message_type, media_id, _user, db):
         data = await self.get_data(phone)
-        total_media = len(data.get("photo_urls", [])) + len(data.get("video_urls", []))
-        if self._is_done_message(input_value):
+        photo_urls = data.get("photo_urls", [])
+        video_urls = data.get("video_urls", [])
+        total_media = len(photo_urls) + len(video_urls)
+
+        # If user sends text while we already have 3+ media, auto-advance
+        if message_type == "text" and total_media >= 3:
+            await self.set_state(phone, "LIST_DOCUMENTS")
+            await whatsapp.send_text(phone, "Perfect! Your photos look great. Now please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
+            return
+
+        # If user says done/continue/next with at least 3 media, advance
+        if self._is_done_message(input_value) or self._is_continue_signal(input_value):
             if total_media < 3:
-                await whatsapp.send_text(phone, f"Whoops! We need at least 3 clear photos or videos before we can continue. So far we've received {total_media}. Please send {3 - total_media} more media file(s).")
+                await whatsapp.send_text(phone, f"We need at least 3 clear photos or videos before we can continue. So far we have received {total_media}. Please send {3 - total_media} more.")
                 return
             await self.set_state(phone, "LIST_DOCUMENTS")
             await whatsapp.send_text(phone, "Perfect! Your photos look great. Now please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
             return
+
         if message_type not in ["image", "video"] or not media_id:
             msg = "Please send a property image or video."
             if total_media > 0:
-                msg += f" We already have {total_media} media file(s). We need at least 3 to continue."
+                msg += f" We have {total_media} media file(s). Send at least 3 to continue, or say 'done' if you have sent enough."
             else:
                 msg += " We need at least 3 to get started."
             await whatsapp.send_text(phone, msg)
             return
 
         media_url = await whatsapp.get_media_url(media_id)
-        media_bytes = await whatsapp.download_media(media_url) if media_url else None
+        if not media_url:
+            await whatsapp.send_text(phone, "I could not retrieve that media file. Please send it again.")
+            return
+
+        media_bytes = await whatsapp.download_media(media_url)
         if not media_bytes:
-            await whatsapp.send_text(phone, "I couldn't quite catch that media file.  Catch it again and send it over!")
+            await whatsapp.send_text(phone, "I could not download that media file. Please check your connection and send it again.")
             return
 
         try:
             uploaded = await media_service.upload(media_bytes, resource_type="video" if message_type == "video" else "image")
         except Exception as e:
-            # Catching Cloudinary/Upload errors specifically
-            await whatsapp.send_text(phone, "I had a little trouble saving that photo. Please check your connection and try again.")
             print(f"Upload error: {e}")
+            await whatsapp.send_text(phone, "I had trouble saving that file. Please try sending it again.")
             return
 
         if not uploaded:
-            await whatsapp.send_text(phone, "Something went wrong while saving your photo. Let's try that one more time!")
+            await whatsapp.send_text(phone, "Something went wrong while saving your file. Please try again.")
+            return
+
+        # Check for duplicate URLs
+        all_urls = set(photo_urls + video_urls)
+        if uploaded in all_urls:
+            await whatsapp.send_text(phone, "It looks like that file was already received. Please send a different photo or video, or say 'done' to continue.")
             return
 
         key = "video_urls" if message_type == "video" else "photo_urls"
         data.setdefault(key, []).append(uploaded)
         await self.set_data(phone, data)
-        total_media = len(data.get("photo_urls", [])) + len(data.get("video_urls", []))
+
+        photo_urls = data.get("photo_urls", [])
+        video_urls = data.get("video_urls", [])
+        total_media = len(photo_urls) + len(video_urls)
 
         if total_media < 3:
-            await whatsapp.send_text(phone, f"Got it! 📸 Your {message_type} is safe with me. That's {total_media} so far. Send us {3 - total_media} more, then say 'done'!")
+            await whatsapp.send_text(phone, f"Got it! That is {total_media} so far. Send {3 - total_media} more, then say 'done' to continue.")
+        elif total_media == 3:
+            await whatsapp.send_text(phone, f"That makes {total_media} media files. You can send more or say 'done' to continue.")
         else:
-            await whatsapp.send_text(phone, f"Awesome! 🌟 That's {total_media} media files. I've got enough to move on, or you can keep 'em coming! Just say 'done' when you're ready.")
+            await whatsapp.send_text(phone, f"Received! That is {total_media} files now. Say 'done' whenever you are ready to continue.")
 
     async def handle_list_legal_rep(self, phone, input_value, *_args):
         legal_phone = format_phone_number(input_value or "")
-        if len(legal_phone) < 10:
-            await whatsapp.send_text(phone, "Please send a valid legal representative phone number, including the correct digits.")
+        if len(legal_phone) < 13:
+            await whatsapp.send_text(phone, "Please send a valid phone number with 11 digits, for example 08012345678.")
             return
         data = await self.get_data(phone)
         data["legal_representative_phone"] = legal_phone
@@ -770,8 +823,8 @@ class ChatbotEngine:
 
     async def handle_list_user_phone(self, phone, input_value, _message_type, _media_id, _user, db):
         user_phone = format_phone_number(input_value or "")
-        if len(user_phone) < 10:
-            await whatsapp.send_text(phone, "Please send a valid phone number, including the correct digits.")
+        if len(user_phone) < 13:
+            await whatsapp.send_text(phone, "Please send a valid phone number with 11 digits, for example 08012345678.")
             return
         data = await self.get_data(phone)
         data["landlord_phone_number"] = user_phone
@@ -783,8 +836,6 @@ class ChatbotEngine:
             title=data["title"],
             address=data["address"],
             neighbourhood=data["neighbourhood"],
-            city=data.get("city", "Abakaliki"),
-            state=data.get("state", "Ebonyi"),
             property_type=PropertyType(data["property_type"]),
             bedrooms=data["bedrooms"],
             amenities=data.get("amenities", []),
@@ -805,8 +856,16 @@ class ChatbotEngine:
 
     async def handle_list_documents(self, phone, input_value, message_type, media_id, _user, db):
         data = await self.get_data(phone)
-        if self._is_done_message(input_value):
-            if not data.get("document_urls"):
+        doc_urls = data.get("document_urls", [])
+
+        # If user sends text and we have documents, auto-advance
+        if message_type == "text" and doc_urls:
+            await self.set_state(phone, "LIST_LEGAL_REP")
+            await whatsapp.send_text(phone, "Thank you. Please share the phone number of a legal representative we should keep on this listing.")
+            return
+
+        if self._is_done_message(input_value) or self._is_continue_signal(input_value):
+            if not doc_urls:
                 await whatsapp.send_text(phone, "Please upload at least one ownership document before replying with done.")
                 return
             await self.set_state(phone, "LIST_LEGAL_REP")
@@ -816,14 +875,21 @@ class ChatbotEngine:
             await whatsapp.send_text(phone, "Please upload the ownership document files for this property, then reply with done when you have finished.")
             return
         media_url = await whatsapp.get_media_url(media_id)
-        media_bytes = await whatsapp.download_media(media_url) if media_url else None
+        if not media_url:
+            await whatsapp.send_text(phone, "We could not retrieve that document. Please send it again.")
+            return
+        media_bytes = await whatsapp.download_media(media_url)
         if not media_bytes:
-            await whatsapp.send_text(phone, "We could not download that document just yet. Please send it again and we will continue from there.")
+            await whatsapp.send_text(phone, "We could not download that document. Please try again.")
             return
         uploaded = await media_service.upload(media_bytes, resource_type="raw", folder="property_documents")
         if not uploaded:
-            await whatsapp.send_text(phone, "We could not save that document just yet. Please send it again and we will continue from there.")
+            await whatsapp.send_text(phone, "We could not save that document. Please try again.")
+            return
+        # Check for duplicate
+        if uploaded in doc_urls:
+            await whatsapp.send_text(phone, "That document was already received. Please send a different document, or say 'done' to continue.")
             return
         data.setdefault("document_urls", []).append(uploaded)
         await self.set_data(phone, data)
-        await whatsapp.send_text(phone, "Your document has been received successfully. You may send more document files, or reply with done to continue.")
+        await whatsapp.send_text(phone, "Your document has been received. You may send more, or say 'done' to continue.")

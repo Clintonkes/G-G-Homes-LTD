@@ -5,9 +5,17 @@ import re
 
 def format_phone_number(phone: str) -> str:
     digits = re.sub(r"\D+", "", phone)
-    if digits.startswith("0"):
-        digits = "234" + digits[1:]
-    if not digits.startswith("234"):
+    # Strip leading zeros before adding country code
+    digits = digits.lstrip("0")
+    if not digits:
+        return ""
+    if digits.startswith("234"):
+        # Already has country code
+        pass
+    elif len(digits) == 10:
+        # Local 10-digit number, add country code
+        digits = f"234{digits}"
+    elif not digits.startswith("234"):
         digits = f"234{digits}"
     return digits
 

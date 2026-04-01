@@ -109,7 +109,7 @@ class Property(Base):
     address: Mapped[str] = mapped_column(String(500))
     neighbourhood: Mapped[str] = mapped_column(String(200), index=True)
     city: Mapped[str] = mapped_column(String(100), default="Abakaliki")
-    state: Mapped[str] = mapped_column(String(100), default="Ebonyi")
+    state: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
     property_type: Mapped[PropertyType] = mapped_column(Enum(PropertyType))
     bedrooms: Mapped[int] = mapped_column(Integer, default=1)
     bathrooms: Mapped[int] = mapped_column(Integer, default=1)
