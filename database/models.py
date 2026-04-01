@@ -25,6 +25,7 @@ class PropertyType(str, enum.Enum):
 
 class PropertyStatus(str, enum.Enum):
     draft = "draft"
+    pending = "pending"
     pending_verification = "pending_verification"
     active = "active"
     rented = "rented"
@@ -102,10 +103,13 @@ class Property(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     landlord_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    landlord_full_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    landlord_phone_number: Mapped[str | None] = mapped_column(String(20), nullable=True)
     title: Mapped[str] = mapped_column(String(300))
     address: Mapped[str] = mapped_column(String(500))
     neighbourhood: Mapped[str] = mapped_column(String(200), index=True)
     city: Mapped[str] = mapped_column(String(100), default="Abakaliki")
+    state: Mapped[str] = mapped_column(String(100), default="Ebonyi")
     property_type: Mapped[PropertyType] = mapped_column(Enum(PropertyType))
     bedrooms: Mapped[int] = mapped_column(Integer, default=1)
     bathrooms: Mapped[int] = mapped_column(Integer, default=1)
@@ -115,9 +119,13 @@ class Property(Base):
     annual_rent: Mapped[float] = mapped_column(Float)
     photo_urls: Mapped[list[str]] = mapped_column(JSON, default=list)
     video_urls: Mapped[list[str]] = mapped_column(JSON, default=list)
+    document_urls: Mapped[list[str]] = mapped_column(JSON, default=list)
+    legal_representative_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    address_matches_documents: Mapped[bool] = mapped_column(Boolean, default=False)
     thumbnail_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[PropertyStatus] = mapped_column(Enum(PropertyStatus), default=PropertyStatus.draft)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    verified_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     listing_type: Mapped[ListingType] = mapped_column(Enum(ListingType), default=ListingType.standard)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

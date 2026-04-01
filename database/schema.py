@@ -55,6 +55,8 @@ class UserRead(ORMBase):
 
 class PropertyCreate(BaseModel):
     landlord_id: int
+    landlord_full_name: str | None = None
+    landlord_phone_number: str | None = None
     title: str
     address: str
     neighbourhood: str
@@ -68,6 +70,9 @@ class PropertyCreate(BaseModel):
     annual_rent: float
     photo_urls: list[str] = Field(default_factory=list)
     video_urls: list[str] = Field(default_factory=list)
+    document_urls: list[str] = Field(default_factory=list)
+    legal_representative_phone: str | None = None
+    address_matches_documents: bool = False
     thumbnail_url: str | None = None
     listing_type: ListingType = ListingType.standard
 
@@ -75,6 +80,8 @@ class PropertyCreate(BaseModel):
 class PropertyRead(ORMBase):
     id: int
     landlord_id: int
+    landlord_full_name: str | None = None
+    landlord_phone_number: str | None = None
     title: str
     address: str
     neighbourhood: str
@@ -88,9 +95,13 @@ class PropertyRead(ORMBase):
     annual_rent: float
     photo_urls: list[str]
     video_urls: list[str]
+    document_urls: list[str]
+    legal_representative_phone: str | None = None
+    address_matches_documents: bool
     thumbnail_url: str | None = None
     status: PropertyStatus
     is_verified: bool
+    verified_at: datetime | None = None
     listing_type: ListingType
 
 

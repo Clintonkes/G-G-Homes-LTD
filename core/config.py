@@ -30,9 +30,9 @@ class Settings(BaseSettings):
     PAYSTACK_PUBLIC_KEY: str = "your_paystack_public_key"
     PAYSTACK_WEBHOOK_SECRET: str = ""
 
-    CLOUDINARY_CLOUD_NAME: str = "your_cloud_name"
-    CLOUDINARY_API_KEY: str = "your_api_key"
-    CLOUDINARY_API_SECRET: str = "your_api_secret"
+    CLOUDINARY_CLOUD_NAME: str | None = None
+    CLOUDINARY_API_KEY: str | None = None
+    CLOUDINARY_API_SECRET: str | None = None
 
     ADMIN_EMAIL: str = "admin@rentease.ng"
     ADMIN_PASSWORD: str = "ChangeThisStrongPassword123!"

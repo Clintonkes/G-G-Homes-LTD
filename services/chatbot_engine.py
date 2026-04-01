@@ -23,7 +23,7 @@ RESUME_KEY_PREFIX = "resume:"
 RESUME_PROMPT_STATE = "RESUME_PROMPT"
 LIST_BEDROOMS_CUSTOM_STATE = "LIST_BEDROOMS_CUSTOM"
 SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
-LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_PHOTOS"}
+LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE"}
 
 
 class ChatbotEngine:
@@ -54,12 +54,28 @@ class ChatbotEngine:
 
     def _is_done_message(self, input_value: str | None) -> bool:
         normalized = self._normalize_text(input_value)
-        return normalized in {"done", "finished", "i am done", "that is all", "that's all", "complete"}
+        if not normalized:
+            return False
+        # Extended recognition for "done" command variations
+        done_patterns = {
+            "done", "finished", "i am done", "that is all", "that's all", "complete",
+            "done sendin", "sent all", "all sent", "done with photos", "done for now",
+            "finis", "all pictures sent", "completed", "done uploading", "no more"
+        }
+        if normalized in done_patterns:
+            return True
+        # Check for presence of "done" in common phrases
+        if any(phrase in normalized for phrase in ["done now", "done with", "already done"]):
+            return True
+        return False
 
     def _is_greeting(self, input_value: str | None) -> bool:
         normalized = self._normalize_text(input_value)
-        greetings = ["hello", "hi", "hey", "good morning", "good afternoon", "good evening", "good day"]
-        return any(normalized.startswith(greeting) for greeting in greetings)
+        if not normalized:
+            return False
+        cleaned = normalized.rstrip("!?. ,")
+        greetings = {"hello", "hi", "hey", "good morning", "good afternoon", "good evening", "good day"}
+        return cleaned in greetings
 
     def _is_clarification_request(self, input_value: str | None) -> bool:
         normalized = self._normalize_text(input_value)
@@ -273,7 +289,11 @@ class ChatbotEngine:
         elif state == "LIST_ADDRESS":
             await whatsapp.send_text(phone, "Please share the property address.")
         elif state == "LIST_NEIGHBOURHOOD":
-            await whatsapp.send_text(phone, "Kindly share the neighbourhood or area for this property.")
+            await whatsapp.send_text(phone, "Kindly share the neighbourhood and a nearby landmark for this property.")
+        elif state == "LIST_CITY":
+            await whatsapp.send_text(phone, "Please share the city where the property is located.")
+        elif state == "LIST_STATE":
+            await whatsapp.send_text(phone, "Please share the state where the property is located.")
         elif state == "LIST_TYPE":
             await whatsapp.send_list(
                 phone,
@@ -290,7 +310,15 @@ class ChatbotEngine:
         elif state == "LIST_AMENITIES":
             await whatsapp.send_text(phone, "Please list the amenities, separated by commas.")
         elif state == "LIST_PHOTOS":
-            await whatsapp.send_text(phone, "You can now send property photos or videos. When you are done, simply say done and we will proceed.")
+            await whatsapp.send_text(phone, "You can now send property photos or videos. Please send at least 3 clear photos or videos of the property. When you are done, simply say done and we will proceed.")
+        elif state == "LIST_DOCUMENTS":
+            await whatsapp.send_text(phone, "Please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
+        elif state == "LIST_LEGAL_REP":
+            await whatsapp.send_text(phone, "Please share the phone number of a legal representative we should keep on this listing.")
+        elif state == "LIST_USER_NAME":
+            await whatsapp.send_text(phone, "Please share your full name so we can complete the property record.")
+        elif state == "LIST_USER_PHONE":
+            await whatsapp.send_text(phone, "Please share your phone number so we can reach you if needed.")
         elif state == "SCHEDULE_DATE":
             await whatsapp.send_text(phone, "Please share your preferred inspection date and time. Example: 15/07/2026 10:00")
         else:
@@ -325,6 +353,7 @@ class ChatbotEngine:
             await whatsapp.mark_as_read(message_id)
         user = await self._get_or_create_user(phone, db)
         phone = format_phone_number(phone)
+        active_state = await self.redis.get(self._state_key(phone))
         state = await self.get_state(phone)
         data = await self.get_data(phone)
         input_value = button_id or (text.strip() if text else None)
@@ -332,7 +361,7 @@ class ChatbotEngine:
         intent_decision = await intent_service.detect_intent(input_value if not button_id else button_id, state)
         intent = intent_decision.intent
 
-        if self._is_greeting(input_value):
+        if self._is_greeting(input_value) and not active_state and state != "MAIN_MENU":
             await self._offer_resume_or_restart(phone, user, state, data)
             return
 
@@ -363,6 +392,22 @@ class ChatbotEngine:
             await self.send_main_menu(phone, user)
             return
 
+        # Restrict photos/videos when not requested
+        is_media = message_type in ["image", "video"]
+        allowed_media_states = {"LIST_PHOTOS", "LIST_DOCUMENTS"}
+        if is_media and state not in allowed_media_states:
+            funny_messages = [
+                "Whoa there! 🛑 I love the enthusiasm, but we aren't quite at the photo stage yet. Let's keep these for later!",
+                "Patience, friend! 📸 I'm not ready to see those beautiful shots just yet. Let's finish the details first!",
+                "Hold your horses! 🐎 I haven't requested any photos yet. I'll let you know exactly when I'm ready for them!",
+                "Easy does it! 😊 We'll get to the photos in a bit. For now, let's focus on the info I'm asking for!"
+            ]
+            import random
+            message = random.choice(funny_messages)
+            await whatsapp.send_text(phone, message)
+            await self._prompt_for_state(phone, state, data, db)
+            return
+
         handler_map = {
             "MAIN_MENU": self.handle_main_menu,
             "SEARCH_LOCATION": self.handle_search_location,
@@ -377,12 +422,18 @@ class ChatbotEngine:
             "LIST_TITLE": self.handle_list_title,
             "LIST_ADDRESS": self.handle_list_address,
             "LIST_NEIGHBOURHOOD": self.handle_list_neighbourhood,
+            "LIST_CITY": self.handle_list_city,
+            "LIST_STATE": self.handle_list_state,
             "LIST_TYPE": self.handle_list_type,
             "LIST_BEDROOMS": self.handle_list_bedrooms,
             LIST_BEDROOMS_CUSTOM_STATE: self.handle_list_bedrooms_custom,
             "LIST_RENT": self.handle_list_rent,
             "LIST_AMENITIES": self.handle_list_amenities,
             "LIST_PHOTOS": self.handle_list_photos,
+            "LIST_DOCUMENTS": self.handle_list_documents,
+            "LIST_LEGAL_REP": self.handle_list_legal_rep,
+            "LIST_USER_NAME": self.handle_list_user_name,
+            "LIST_USER_PHONE": self.handle_list_user_phone,
         }
         handler = handler_map.get(state, self.handle_main_menu)
         await handler(phone, input_value, message_type, media_id, user, db)
@@ -561,11 +612,25 @@ class ChatbotEngine:
         data["address"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_NEIGHBOURHOOD")
-        await whatsapp.send_text(phone, "Kindly share the neighbourhood or area for this property.")
+        await whatsapp.send_text(phone, "Kindly share the neighbourhood and a nearby landmark for this property.")
 
     async def handle_list_neighbourhood(self, phone, input_value, *_args):
         data = await self.get_data(phone)
         data["neighbourhood"] = input_value
+        await self.set_data(phone, data)
+        await self.set_state(phone, "LIST_CITY")
+        await whatsapp.send_text(phone, "Please share the city where the property is located.")
+
+    async def handle_list_city(self, phone, input_value, *_args):
+        data = await self.get_data(phone)
+        data["city"] = input_value
+        await self.set_data(phone, data)
+        await self.set_state(phone, "LIST_STATE")
+        await whatsapp.send_text(phone, "Please share the state where the property is located.")
+
+    async def handle_list_state(self, phone, input_value, *_args):
+        data = await self.get_data(phone)
+        data["state"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_TYPE")
         await whatsapp.send_list(
@@ -632,44 +697,133 @@ class ChatbotEngine:
         data["video_urls"] = []
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_PHOTOS")
-        await whatsapp.send_text(phone, "You can now send property photos or videos. When you are done, simply say done and we will proceed.")
+        await whatsapp.send_text(phone, "You can now send property photos or videos. Please send at least 3 clear photos or videos of the property. When you are done, simply say done and we will proceed.")
 
     async def handle_list_photos(self, phone, input_value, message_type, media_id, _user, db):
         data = await self.get_data(phone)
+        total_media = len(data.get("photo_urls", [])) + len(data.get("video_urls", []))
         if self._is_done_message(input_value):
-            prop = Property(
-                landlord_id=data["landlord_id"],
-                title=data["title"],
-                address=data["address"],
-                neighbourhood=data["neighbourhood"],
-                property_type=PropertyType(data["property_type"]),
-                bedrooms=data["bedrooms"],
-                amenities=data.get("amenities", []),
-                annual_rent=data["annual_rent"],
-                photo_urls=data.get("photo_urls", []),
-                video_urls=data.get("video_urls", []),
-                thumbnail_url=(data.get("photo_urls") or [None])[0],
-                status=PropertyStatus.pending_verification,
-                is_verified=False,
-            )
-            db.add(prop)
-            await db.commit()
-            await self.clear_session(phone)
-            await whatsapp.send_text(phone, "Thank you. Your property has been saved and submitted for verification. Our team will review it and keep you updated.")
+            if total_media < 3:
+                await whatsapp.send_text(phone, f"Whoops! We need at least 3 clear photos or videos before we can continue. So far we've received {total_media}. Please send {3 - total_media} more media file(s).")
+                return
+            await self.set_state(phone, "LIST_DOCUMENTS")
+            await whatsapp.send_text(phone, "Perfect! Your photos look great. Now please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
             return
         if message_type not in ["image", "video"] or not media_id:
-            await whatsapp.send_text(phone, "Please send an image or video, or simply say done when you are finished uploading the media.")
+            msg = "Please send a property image or video."
+            if total_media > 0:
+                msg += f" We already have {total_media} media file(s). We need at least 3 to continue."
+            else:
+                msg += " We need at least 3 to get started."
+            await whatsapp.send_text(phone, msg)
+            return
+
+        media_url = await whatsapp.get_media_url(media_id)
+        media_bytes = await whatsapp.download_media(media_url) if media_url else None
+        if not media_bytes:
+            await whatsapp.send_text(phone, "I couldn't quite catch that media file.  Catch it again and send it over!")
+            return
+
+        try:
+            uploaded = await media_service.upload(media_bytes, resource_type="video" if message_type == "video" else "image")
+        except Exception as e:
+            # Catching Cloudinary/Upload errors specifically
+            await whatsapp.send_text(phone, "I had a little trouble saving that photo. Please check your connection and try again.")
+            print(f"Upload error: {e}")
+            return
+
+        if not uploaded:
+            await whatsapp.send_text(phone, "Something went wrong while saving your photo. Let's try that one more time!")
+            return
+
+        key = "video_urls" if message_type == "video" else "photo_urls"
+        data.setdefault(key, []).append(uploaded)
+        await self.set_data(phone, data)
+        total_media = len(data.get("photo_urls", [])) + len(data.get("video_urls", []))
+
+        if total_media < 3:
+            await whatsapp.send_text(phone, f"Got it! 📸 Your {message_type} is safe with me. That's {total_media} so far. Send us {3 - total_media} more, then say 'done'!")
+        else:
+            await whatsapp.send_text(phone, f"Awesome! 🌟 That's {total_media} media files. I've got enough to move on, or you can keep 'em coming! Just say 'done' when you're ready.")
+
+    async def handle_list_legal_rep(self, phone, input_value, *_args):
+        legal_phone = format_phone_number(input_value or "")
+        if len(legal_phone) < 10:
+            await whatsapp.send_text(phone, "Please send a valid legal representative phone number, including the correct digits.")
+            return
+        data = await self.get_data(phone)
+        data["legal_representative_phone"] = legal_phone
+        await self.set_data(phone, data)
+        await self.set_state(phone, "LIST_USER_NAME")
+        await whatsapp.send_text(phone, "Please share your full name so we can complete the property record.")
+
+    async def handle_list_user_name(self, phone, input_value, *_args):
+        full_name = (input_value or "").strip()
+        if len(full_name.split()) < 2:
+            await whatsapp.send_text(phone, "Please share your full name, for example Firstname Lastname.")
+            return
+        data = await self.get_data(phone)
+        data["landlord_full_name"] = full_name
+        await self.set_data(phone, data)
+        await self.set_state(phone, "LIST_USER_PHONE")
+        await whatsapp.send_text(phone, "Please share your phone number so we can reach you if needed.")
+
+    async def handle_list_user_phone(self, phone, input_value, _message_type, _media_id, _user, db):
+        user_phone = format_phone_number(input_value or "")
+        if len(user_phone) < 10:
+            await whatsapp.send_text(phone, "Please send a valid phone number, including the correct digits.")
+            return
+        data = await self.get_data(phone)
+        data["landlord_phone_number"] = user_phone
+        await self.set_data(phone, data)
+        prop = Property(
+            landlord_id=data["landlord_id"],
+            landlord_full_name=data.get("landlord_full_name"),
+            landlord_phone_number=data.get("landlord_phone_number"),
+            title=data["title"],
+            address=data["address"],
+            neighbourhood=data["neighbourhood"],
+            city=data.get("city", "Abakaliki"),
+            state=data.get("state", "Ebonyi"),
+            property_type=PropertyType(data["property_type"]),
+            bedrooms=data["bedrooms"],
+            amenities=data.get("amenities", []),
+            annual_rent=data["annual_rent"],
+            photo_urls=data.get("photo_urls", []),
+            video_urls=data.get("video_urls", []),
+            document_urls=data.get("document_urls", []),
+            legal_representative_phone=data.get("legal_representative_phone"),
+            address_matches_documents=True,
+            thumbnail_url=(data.get("photo_urls") or [None])[0],
+            status=PropertyStatus.pending,
+            is_verified=False,
+        )
+        db.add(prop)
+        await db.commit()
+        await self.clear_session(phone)
+        await whatsapp.send_text(phone, "Thank you. Your property details, photos, and ownership documents have been submitted successfully. We will verify the details within 24 hours and send you an update here.")
+
+    async def handle_list_documents(self, phone, input_value, message_type, media_id, _user, db):
+        data = await self.get_data(phone)
+        if self._is_done_message(input_value):
+            if not data.get("document_urls"):
+                await whatsapp.send_text(phone, "Please upload at least one ownership document before replying with done.")
+                return
+            await self.set_state(phone, "LIST_LEGAL_REP")
+            await whatsapp.send_text(phone, "Thank you. Please share the phone number of a legal representative we should keep on this listing.")
+            return
+        if message_type != "document" or not media_id:
+            await whatsapp.send_text(phone, "Please upload the ownership document files for this property, then reply with done when you have finished.")
             return
         media_url = await whatsapp.get_media_url(media_id)
         media_bytes = await whatsapp.download_media(media_url) if media_url else None
         if not media_bytes:
-            await whatsapp.send_text(phone, "We could not download that media just yet. Please send it again and we will try immediately.")
+            await whatsapp.send_text(phone, "We could not download that document just yet. Please send it again and we will continue from there.")
             return
-        uploaded = await media_service.upload(media_bytes, resource_type="video" if message_type == "video" else "image")
+        uploaded = await media_service.upload(media_bytes, resource_type="raw", folder="property_documents")
         if not uploaded:
-            await whatsapp.send_text(phone, "We could not upload that media at the moment. Please try again and we will continue from there.")
+            await whatsapp.send_text(phone, "We could not save that document just yet. Please send it again and we will continue from there.")
             return
-        key = "video_urls" if message_type == "video" else "photo_urls"
-        data.setdefault(key, []).append(uploaded)
+        data.setdefault("document_urls", []).append(uploaded)
         await self.set_data(phone, data)
-        await whatsapp.send_text(phone, f"Your {message_type} has been received successfully. You may send more, or simply say done when you are ready for us to proceed.")
+        await whatsapp.send_text(phone, "Your document has been received successfully. You may send more document files, or reply with done to continue.")

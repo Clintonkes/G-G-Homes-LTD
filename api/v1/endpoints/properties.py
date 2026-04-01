@@ -1,5 +1,7 @@
 """Property endpoints for listing searches, property retrieval, creation, and admin verification."""
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +10,7 @@ from database.models import Property, PropertyStatus
 from database.schema import PropertyCreate, PropertyRead
 from database.session import get_db
 from services.property_service import property_service
+from services.whatsapp_service import whatsapp
 from utils.helpers import parse_naira_amount
 
 router = APIRouter()
@@ -53,6 +56,14 @@ async def verify_property(property_id: int, _admin=Depends(get_current_admin_use
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
     prop.is_verified = True
     prop.status = PropertyStatus.active
+    prop.verified_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(prop)
+    landlord = prop.landlord
+    if landlord and landlord.phone_number:
+        name = (landlord.full_name or "Partner").strip() or "Partner"
+        await whatsapp.send_text(
+            landlord.phone_number,
+            f"Congratulations {name}. Your property '{prop.title}' has been verified, listed successfully, and is now available for prospective tenants on G & G Homes Ltd.",
+        )
     return prop

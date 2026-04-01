@@ -52,7 +52,7 @@ async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(
                 button_id = interactive.get("button_reply", {}).get("id")
             elif itype == "list_reply":
                 button_id = interactive.get("list_reply", {}).get("id")
-        elif msg_type in ["image", "video"]:
+        elif msg_type in ["image", "video", "document"]:
             media_id = msg.get(msg_type, {}).get("id")
 
         redis = await get_redis()
