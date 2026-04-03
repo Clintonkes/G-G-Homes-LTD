@@ -21,6 +21,8 @@ class PropertyType(str, enum.Enum):
     flat = "flat"
     duplex = "duplex"
     bungalow = "bungalow"
+    office_space = "office_space"
+    warehouse = "warehouse"
 
 
 class PropertyStatus(str, enum.Enum):

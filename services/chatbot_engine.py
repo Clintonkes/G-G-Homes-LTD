@@ -301,10 +301,11 @@ class ChatbotEngine:
                     "title": "Types",
                     "rows": [
                         {"id": "self_contain", "title": "Self Contain"},
-                        {"id": "room_and_parlour", "title": "Room and Parlour"},
                         {"id": "flat", "title": "Flat"},
                         {"id": "duplex", "title": "Duplex"},
                         {"id": "bungalow", "title": "Bungalow"},
+                        {"id": "office_space", "title": "Office Space"},
+                        {"id": "warehouse", "title": "Warehouse"},
                     ],
                 }],
             )
@@ -327,7 +328,7 @@ class ChatbotEngine:
                 phone,
                 "Please select the property type.",
                 "Choose Type",
-                [{"title": "Property Types", "rows": [{"id": item.value, "title": item.value.replace("_", " ").title()} for item in PropertyType]}],
+                [{"title": "Property Types", "rows": [{"id": item.value, "title": item.value.replace("_", " ").title()} for item in PropertyType if item != PropertyType.room_and_parlour]}],
             )
         elif state == "LIST_BEDROOMS":
             await self._send_listing_bedroom_options(phone)
@@ -370,7 +371,7 @@ class ChatbotEngine:
             phone,
             welcome_message,
             [
-                {"id": "search_property", "title": "Find a Home"},
+                {"id": "search_property", "title": "Find a Property"},
                 {"id": "list_property", "title": "List Property"},
                 {"id": "my_account", "title": "My Account"},
             ],
@@ -466,9 +467,31 @@ class ChatbotEngine:
         handler = handler_map.get(state, self.handle_main_menu)
         await handler(phone, input_value, message_type, media_id, user, db)
 
+    def _is_new_start_signal(self, input_value: str | None) -> bool:
+        """Detect free-text signals meaning the user wants a fresh start."""
+        normalized = self._normalize_text(input_value)
+        if not normalized:
+            return False
+        cleaned = normalized.rstrip("!?. ,")
+        exact = {
+            "new", "fresh", "afresh", "restart", "reset", "start over",
+            "start fresh", "start afresh", "start new", "begin again",
+            "fresh start", "new start", "new conversation", "lets start afresh",
+            "let's start afresh", "let us start afresh", "start from scratch",
+            "from scratch", "scratch",
+        }
+        if cleaned in exact:
+            return True
+        subphrases = ["start afresh", "start fresh", "start new", "start over", "begin again", "from scratch"]
+        return any(p in normalized for p in subphrases)
+
     async def handle_resume_prompt(self, phone: str, input_value: str | None, user: User, db: AsyncSession) -> None:
         data = await self.get_data(phone)
-        if input_value == "resume_previous":
+
+        is_resume = input_value == "resume_previous" or self._is_continue_signal(input_value)
+        is_new = input_value == "resume_new" or self._is_new_start_signal(input_value)
+
+        if is_resume:
             target_state = data.get("resume_target_state", "MAIN_MENU")
             target_data = data.get("resume_target_data", {})
             await self._write_active_data(phone, target_data)
@@ -477,7 +500,7 @@ class ChatbotEngine:
             await whatsapp.send_text(phone, "Welcome back. We are continuing from where we stopped.")
             await self._prompt_for_state(phone, target_state, target_data, db)
             return
-        if input_value == "resume_new":
+        if is_new:
             await self.clear_session(phone)
             await self.send_main_menu(phone, user)
             return
@@ -528,10 +551,11 @@ class ChatbotEngine:
                 "title": "Types",
                 "rows": [
                     {"id": "self_contain", "title": "Self Contain"},
-                    {"id": "room_and_parlour", "title": "Room and Parlour"},
                     {"id": "flat", "title": "Flat"},
                     {"id": "duplex", "title": "Duplex"},
                     {"id": "bungalow", "title": "Bungalow"},
+                    {"id": "office_space", "title": "Office Space"},
+                    {"id": "warehouse", "title": "Warehouse"},
                 ],
             }],
         )
@@ -665,13 +689,19 @@ class ChatbotEngine:
             phone,
             "Please select the property type.",
             "Choose Type",
-            [{"title": "Property Types", "rows": [{"id": item.value, "title": item.value.replace("_", " ").title()} for item in PropertyType]}],
+            [{"title": "Property Types", "rows": [{"id": item.value, "title": item.value.replace("_", " ").title()} for item in PropertyType if item != PropertyType.room_and_parlour]}],
         )
 
     async def handle_list_type(self, phone, input_value, *_args):
         data = await self.get_data(phone)
         data["property_type"] = input_value
         await self.set_data(phone, data)
+        if input_value in (PropertyType.office_space.value, PropertyType.warehouse.value):
+            data["bedrooms"] = 0
+            await self.set_data(phone, data)
+            await self.set_state(phone, "LIST_RENT")
+            await whatsapp.send_text(phone, "Please enter the annual rent amount in naira. You can write it as 500000 or 500,000.")
+            return
         await self.set_state(phone, "LIST_BEDROOMS")
         await self._send_listing_bedroom_options(phone)
 
@@ -846,7 +876,7 @@ class ChatbotEngine:
             legal_representative_phone=data.get("legal_representative_phone"),
             address_matches_documents=True,
             thumbnail_url=(data.get("photo_urls") or [None])[0],
-            status=PropertyStatus.pending,
+            status=PropertyStatus.pending_verification,
             is_verified=False,
         )
         db.add(prop)
@@ -870,6 +900,9 @@ class ChatbotEngine:
                 return
             await self.set_state(phone, "LIST_LEGAL_REP")
             await whatsapp.send_text(phone, "Thank you. Please share the phone number of a legal representative we should keep on this listing.")
+            return
+        if message_type in ["image", "video"]:
+            await whatsapp.send_text(phone, "This section is for ownership documents only — PDF, Word, or similar legal files. Photos and videos cannot be accepted here. Please send the document files that prove ownership of this property.")
             return
         if message_type != "document" or not media_id:
             await whatsapp.send_text(phone, "Please upload the ownership document files for this property, then reply with done when you have finished.")

@@ -35,29 +35,30 @@ async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(
         if not messages:
             return {"status": "ok"}
 
-        msg = messages[0]
-        msg_id = msg.get("id", "")
-        phone = msg.get("from", "")
-        msg_type = msg.get("type", "")
-        text = None
-        button_id = None
-        media_id = None
-
-        if msg_type == "text":
-            text = msg.get("text", {}).get("body", "")
-        elif msg_type == "interactive":
-            interactive = msg.get("interactive", {})
-            itype = interactive.get("type", "")
-            if itype == "button_reply":
-                button_id = interactive.get("button_reply", {}).get("id")
-            elif itype == "list_reply":
-                button_id = interactive.get("list_reply", {}).get("id")
-        elif msg_type in ["image", "video", "document"]:
-            media_id = msg.get(msg_type, {}).get("id")
-
         redis = await get_redis()
         engine = ChatbotEngine(redis_client=redis)
-        await engine.process_message(phone=phone, message_type=msg_type, text=text, button_id=button_id, media_id=media_id, message_id=msg_id, db=db)
+
+        for msg in messages:
+            msg_id = msg.get("id", "")
+            phone = msg.get("from", "")
+            msg_type = msg.get("type", "")
+            text = None
+            button_id = None
+            media_id = None
+
+            if msg_type == "text":
+                text = msg.get("text", {}).get("body", "")
+            elif msg_type == "interactive":
+                interactive = msg.get("interactive", {})
+                itype = interactive.get("type", "")
+                if itype == "button_reply":
+                    button_id = interactive.get("button_reply", {}).get("id")
+                elif itype == "list_reply":
+                    button_id = interactive.get("list_reply", {}).get("id")
+            elif msg_type in ["image", "video", "document"]:
+                media_id = msg.get(msg_type, {}).get("id")
+
+            await engine.process_message(phone=phone, message_type=msg_type, text=text, button_id=button_id, media_id=media_id, message_id=msg_id, db=db)
     except Exception as exc:
         logger.error("Webhook error: %s", exc, exc_info=True)
         if phone:
