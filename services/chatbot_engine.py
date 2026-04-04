@@ -1,5 +1,6 @@
 """Conversation engine for WhatsApp interactions, including state management, intent handling, and guided user flows."""
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -20,6 +21,8 @@ from utils.helpers import format_naira, format_phone_number, parse_naira_amount
 STATE_KEY_PREFIX = "state:"
 DATA_KEY_PREFIX = "data:"
 RESUME_KEY_PREFIX = "resume:"
+MEDIA_BATCH_KEY_PREFIX = "media_batch:"
+RECENT_CONTEXT_KEY_PREFIX = "recent_context:"
 RESUME_PROMPT_STATE = "RESUME_PROMPT"
 LIST_BEDROOMS_CUSTOM_STATE = "LIST_BEDROOMS_CUSTOM"
 SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
@@ -109,6 +112,142 @@ class ChatbotEngine:
         normalized = self._normalize_text(input_value)
         prompts = ["what do you mean", "what are amenities", "which amenities", "example", "examples", "help", "explain"]
         return normalized.endswith("?") or any(prompt in normalized for prompt in prompts)
+
+    def _pluralize(self, count: int, singular: str, plural: str | None = None) -> str:
+        return singular if count == 1 else (plural or f"{singular}s")
+
+    def _media_batch_key(self, phone: str, state: str) -> str:
+        return f"{MEDIA_BATCH_KEY_PREFIX}{state}:{phone}"
+
+    def _recent_context_key(self, phone: str) -> str:
+        return f"{RECENT_CONTEXT_KEY_PREFIX}{phone}"
+
+    def _is_gratitude_message(self, input_value: str | None) -> bool:
+        normalized = self._normalize_text(input_value)
+        if not normalized:
+            return False
+        gratitude_patterns = {
+            "thank you", "thanks", "thank u", "thanks a lot", "many thanks",
+            "thank you so much", "thanks so much", "thank you very much", "tnx",
+            "thx", "okay thanks", "ok thanks", "alright thanks",
+        }
+        if normalized in gratitude_patterns:
+            return True
+        gratitude_phrases = ["thank you", "thanks", "many thanks", "appreciate it", "grateful"]
+        return any(phrase in normalized for phrase in gratitude_phrases)
+
+    def _is_status_check_message(self, input_value: str | None) -> bool:
+        normalized = self._normalize_text(input_value)
+        if not normalized:
+            return False
+        exact = {"status", "update", "any update", "progress", "how far", "what is the update"}
+        if normalized in exact:
+            return True
+        phrases = ["any update", "status of", "what is the status", "how far", "give me an update"]
+        return any(phrase in normalized for phrase in phrases)
+
+    def _describe_listing_status(self, status: str | None) -> str:
+        if status == PropertyStatus.pending_verification.value:
+            return "awaiting verification"
+        if status == "suspended":
+            return "currently suspended pending review"
+        if not status:
+            return "under review"
+        return status.replace("_", " ")
+
+    def _state_instruction_text(self, state: str, data: dict) -> str:
+        prompts = {
+            "SEARCH_LOCATION": "Please tell us the neighbourhood, area, or location you want to search.",
+            "SEARCH_BUDGET": "Please choose the budget range you would like us to work with.",
+            "SEARCH_TYPE": "Please select the property type you prefer.",
+            "SEARCH_BEDROOMS": "Please choose the bedroom option that matches what you want.",
+            "VIEW_RESULTS": "Please reply with the number of the property you would like to view.",
+            "VIEW_PROPERTY": "Tap Book Inspection whenever you are ready.",
+            "SCHEDULE_DATE": "Please share your preferred inspection date and time. Example: 15/07/2026 10:00.",
+            "SCHEDULE_CONFIRM": "Please tap Confirm when you are ready to finalize the inspection booking.",
+            "LIST_TITLE": "Please share the property title.",
+            "LIST_ADDRESS": "Please share the property address.",
+            "LIST_NEIGHBOURHOOD": "Please share the neighbourhood and a nearby landmark for this property.",
+            "LIST_CITY": "Please share the city where the property is located.",
+            "LIST_STATE": "Please share the state where the property is located.",
+            "LIST_TYPE": "Please select the property type.",
+            "LIST_BEDROOMS": "Please choose the bedroom count for this property.",
+            LIST_BEDROOMS_CUSTOM_STATE: "Please enter the exact number of bedrooms for this property.",
+            "LIST_RENT": "Please enter the annual rent amount in naira.",
+            "LIST_AMENITIES": "Please list the amenities, separated by commas.",
+            "LIST_PHOTOS": "Please send at least 3 clear property photos or videos before we continue.",
+            "LIST_DOCUMENTS": "Please upload the ownership documents for this property and reply with done when you finish.",
+            "LIST_LEGAL_REP": "Please share the phone number of a legal representative for this listing.",
+            "LIST_USER_NAME": "Please share your full name so we can complete the property record.",
+            "LIST_USER_PHONE": "Please share your phone number so we can reach you if needed.",
+        }
+        return prompts.get(state, "Please continue with the current step and we will guide you.")
+
+    async def _set_recent_context(self, phone: str, payload: dict) -> None:
+        await self.redis.set(self._recent_context_key(phone), json.dumps(payload), ex=settings.REDIS_RESUME_TTL_SECONDS)
+
+    async def _get_recent_context(self, phone: str) -> dict:
+        payload = await self.redis.get(self._recent_context_key(phone))
+        if not payload:
+            return {}
+        try:
+            data = json.loads(payload)
+        except (TypeError, ValueError):
+            await self.redis.delete(self._recent_context_key(phone))
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def _remember_listing_outcome(self, phone: str, status: str) -> None:
+        await self._set_recent_context(
+            phone,
+            {
+                "kind": "listing_completion",
+                "status": status,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    async def _register_media_batch(self, phone: str, state: str) -> str:
+        token = datetime.now(timezone.utc).isoformat()
+        await self.redis.set(self._media_batch_key(phone, state), token, ex=30)
+        return token
+
+    async def _await_media_quiet_period(self, phone: str, state: str, token: str) -> bool:
+        await asyncio.sleep(1.5)
+        latest = await self.redis.get(self._media_batch_key(phone, state))
+        return latest == token
+
+    async def _handle_recent_context_message(self, phone: str, input_value: str | None, recent_context: dict, active_state: str | None) -> bool:
+        if active_state or not recent_context:
+            return False
+        if recent_context.get("kind") != "listing_completion":
+            return False
+        status_text = self._describe_listing_status(recent_context.get("status"))
+        if self._is_gratitude_message(input_value):
+            await whatsapp.send_text(phone, f"You are welcome. Your recent property listing is {status_text}. We will keep you updated here as soon as there is progress.")
+            return True
+        if self._is_greeting(input_value):
+            await whatsapp.send_text(phone, f"Hello again. Your recent property listing is still {status_text}. We will keep you updated here. If you need anything else, say menu.")
+            return True
+        if self._is_status_check_message(input_value):
+            await whatsapp.send_text(phone, f"Your recent property listing is currently {status_text}. We will send the next update here as soon as there is progress.")
+            return True
+        return False
+
+    async def _handle_unexpected_media(self, phone: str, state: str, data: dict, media_types: set[str]) -> None:
+        if state == "LIST_PHOTOS" and "document" in media_types:
+            total_media = len(data.get("photo_urls", [])) + len(data.get("video_urls", []))
+            message = "We are still collecting property photos and videos right now. Please finish sending at least 3 clear photos or videos before we move to ownership documents."
+            if total_media > 0:
+                message += f" We currently have {total_media}."
+            await whatsapp.send_text(phone, message)
+            return
+        if state == "LIST_DOCUMENTS" and any(media_type in {"image", "video"} for media_type in media_types):
+            await whatsapp.send_text(phone, "We are now on the ownership document step. Please send PDF, Word, or similar legal document files only. Property photos and videos cannot be accepted at this stage.")
+            return
+        descriptor = "document files" if media_types == {"document"} else "photos or videos" if media_types <= {"image", "video"} else "files"
+        instruction = self._state_instruction_text(state, data)
+        await whatsapp.send_text(phone, f"I noticed you sent {descriptor}, but we are not collecting files at this stage. {instruction}")
 
     async def _write_active_state(self, phone: str, state: str) -> None:
         await self.redis.set(self._state_key(phone), state, ex=settings.REDIS_STATE_TTL_SECONDS)
@@ -377,9 +516,10 @@ class ChatbotEngine:
             ],
         )
 
-    async def process_message(self, phone, message_type, text, button_id, media_id, message_id, db):
-        if message_id:
-            await whatsapp.mark_as_read(message_id)
+    async def process_message(self, phone, message_type, text, button_id, media_id, message_id, db, media_items=None, message_ids=None):
+        read_ids = [mid for mid in (message_ids or [message_id]) if mid]
+        for mid in read_ids:
+            await whatsapp.mark_as_read(mid)
         user = await self._get_or_create_user(phone, db)
         phone = format_phone_number(phone)
         active_state = await self.redis.get(self._state_key(phone))
@@ -387,12 +527,7 @@ class ChatbotEngine:
         data = await self.get_data(phone)
         input_value = button_id or (text.strip() if text else None)
         normalized = self._normalize_text(input_value)
-        intent_decision = await intent_service.detect_intent(input_value if not button_id else button_id, state)
-        intent = intent_decision.intent
-
-        if self._is_greeting(input_value) and not active_state and state != "MAIN_MENU":
-            await self._offer_resume_or_restart(phone, user, state, data)
-            return
+        recent_context = await self._get_recent_context(phone)
 
         if normalized in ["menu", "home", "start"]:
             await self.clear_session(phone)
@@ -402,6 +537,29 @@ class ChatbotEngine:
         if normalized in ["cancel", "stop", "back"]:
             await self.clear_session(phone)
             await self.send_main_menu(phone, user)
+            return
+
+        media_items = media_items or ([{"type": message_type, "id": media_id}] if message_type in ["image", "video", "document"] and media_id else None)
+        incoming_media_types = {item.get("type") for item in (media_items or []) if item.get("type")}
+        if incoming_media_types:
+            if state not in {"LIST_PHOTOS", "LIST_DOCUMENTS"}:
+                await self._handle_unexpected_media(phone, state, data, incoming_media_types)
+                return
+            if state == "LIST_PHOTOS" and "document" in incoming_media_types:
+                await self._handle_unexpected_media(phone, state, data, incoming_media_types)
+                return
+            if state == "LIST_DOCUMENTS" and any(media_type in {"image", "video"} for media_type in incoming_media_types):
+                await self._handle_unexpected_media(phone, state, data, incoming_media_types)
+                return
+
+        if await self._handle_recent_context_message(phone, input_value, recent_context, active_state):
+            return
+
+        intent_decision = await intent_service.detect_intent(input_value if not button_id else button_id, state)
+        intent = intent_decision.intent
+
+        if self._is_greeting(input_value) and not active_state and state != "MAIN_MENU":
+            await self._offer_resume_or_restart(phone, user, state, data)
             return
 
         if state == RESUME_PROMPT_STATE:
@@ -419,22 +577,6 @@ class ChatbotEngine:
         if intent == "my_account" and state == "MAIN_MENU":
             await whatsapp.send_text(phone, "We can help with account and booking support. Please tell us what you would like to check, or choose an option below to continue.")
             await self.send_main_menu(phone, user)
-            return
-
-        # Restrict photos/videos when not requested
-        is_media = message_type in ["image", "video"]
-        allowed_media_states = {"LIST_PHOTOS", "LIST_DOCUMENTS"}
-        if is_media and state not in allowed_media_states:
-            funny_messages = [
-                "Whoa there! 🛑 I love the enthusiasm, but we aren't quite at the photo stage yet. Let's keep these for later!",
-                "Patience, friend! 📸 I'm not ready to see those beautiful shots just yet. Let's finish the details first!",
-                "Hold your horses! 🐎 I haven't requested any photos yet. I'll let you know exactly when I'm ready for them!",
-                "Easy does it! 😊 We'll get to the photos in a bit. For now, let's focus on the info I'm asking for!"
-            ]
-            import random
-            message = random.choice(funny_messages)
-            await whatsapp.send_text(phone, message)
-            await self._prompt_for_state(phone, state, data, db)
             return
 
         handler_map = {
@@ -465,6 +607,12 @@ class ChatbotEngine:
             "LIST_USER_PHONE": self.handle_list_user_phone,
         }
         handler = handler_map.get(state, self.handle_main_menu)
+        if state == "LIST_PHOTOS":
+            await handler(phone, input_value, message_type, media_id, user, db, media_items)
+            return
+        if state == "LIST_DOCUMENTS":
+            await handler(phone, input_value, message_type, media_id, user, db, media_items)
+            return
         await handler(phone, input_value, message_type, media_id, user, db)
 
     def _is_new_start_signal(self, input_value: str | None) -> bool:
@@ -757,19 +905,17 @@ class ChatbotEngine:
         await self.set_state(phone, "LIST_PHOTOS")
         await whatsapp.send_text(phone, "You can now send property photos or videos. Please send at least 3 clear photos or videos of the property. When you are done, simply say done and we will proceed.")
 
-    async def handle_list_photos(self, phone, input_value, message_type, media_id, _user, db):
+    async def handle_list_photos(self, phone, input_value, message_type, media_id, _user, db, media_items=None):
         data = await self.get_data(phone)
         photo_urls = data.get("photo_urls", [])
         video_urls = data.get("video_urls", [])
         total_media = len(photo_urls) + len(video_urls)
 
-        # If user sends text while we already have 3+ media, auto-advance
         if message_type == "text" and total_media >= 3:
             await self.set_state(phone, "LIST_DOCUMENTS")
             await whatsapp.send_text(phone, "Perfect! Your photos look great. Now please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
             return
 
-        # If user says done/continue/next with at least 3 media, advance
         if self._is_done_message(input_value) or self._is_continue_signal(input_value):
             if total_media < 3:
                 await whatsapp.send_text(phone, f"We need at least 3 clear photos or videos before we can continue. So far we have received {total_media}. Please send {3 - total_media} more.")
@@ -787,47 +933,80 @@ class ChatbotEngine:
             await whatsapp.send_text(phone, msg)
             return
 
-        media_url = await whatsapp.get_media_url(media_id)
-        if not media_url:
-            await whatsapp.send_text(phone, "I could not retrieve that media file. Please send it again.")
-            return
-
-        media_bytes = await whatsapp.download_media(media_url)
-        if not media_bytes:
-            await whatsapp.send_text(phone, "I could not download that media file. Please check your connection and send it again.")
-            return
-
-        try:
-            uploaded = await media_service.upload(media_bytes, resource_type="video" if message_type == "video" else "image")
-        except Exception as e:
-            print(f"Upload error: {e}")
-            await whatsapp.send_text(phone, "I had trouble saving that file. Please try sending it again.")
-            return
-
-        if not uploaded:
-            await whatsapp.send_text(phone, "Something went wrong while saving your file. Please try again.")
-            return
-
-        # Check for duplicate URLs
+        incoming_media = media_items or [{"type": message_type, "id": media_id}]
         all_urls = set(photo_urls + video_urls)
-        if uploaded in all_urls:
-            await whatsapp.send_text(phone, "It looks like that file was already received. Please send a different photo or video, or say 'done' to continue.")
+        accepted_count = 0
+        duplicate_count = 0
+        failed_count = 0
+
+        for item in incoming_media:
+            current_type = item.get("type")
+            current_id = item.get("id")
+            if current_type not in ["image", "video"] or not current_id:
+                failed_count += 1
+                continue
+
+            media_url = await whatsapp.get_media_url(current_id)
+            if not media_url:
+                failed_count += 1
+                continue
+
+            media_bytes = await whatsapp.download_media(media_url)
+            if not media_bytes:
+                failed_count += 1
+                continue
+
+            try:
+                uploaded = await media_service.upload(media_bytes, resource_type="video" if current_type == "video" else "image")
+            except Exception:
+                failed_count += 1
+                continue
+
+            if not uploaded:
+                failed_count += 1
+                continue
+
+            if uploaded in all_urls:
+                duplicate_count += 1
+                continue
+
+            all_urls.add(uploaded)
+            key = "video_urls" if current_type == "video" else "photo_urls"
+            data.setdefault(key, []).append(uploaded)
+            accepted_count += 1
+
+        if accepted_count:
+            await self.set_data(phone, data)
+
+        batch_token = await self._register_media_batch(phone, "LIST_PHOTOS")
+        if not await self._await_media_quiet_period(phone, "LIST_PHOTOS", batch_token):
             return
 
-        key = "video_urls" if message_type == "video" else "photo_urls"
-        data.setdefault(key, []).append(uploaded)
-        await self.set_data(phone, data)
-
+        data = await self.get_data(phone)
         photo_urls = data.get("photo_urls", [])
         video_urls = data.get("video_urls", [])
         total_media = len(photo_urls) + len(video_urls)
 
+        if accepted_count == 0 and duplicate_count and not failed_count:
+            await whatsapp.send_text(phone, "It looks like those file(s) were already received. Please send different photos or videos, or say 'done' to continue.")
+            return
+        if accepted_count == 0 and failed_count:
+            await whatsapp.send_text(phone, "I could not save those media files. Please send them again. Once we have at least 3, you can say 'done' to continue.")
+            return
+
         if total_media < 3:
-            await whatsapp.send_text(phone, f"Got it! That is {total_media} so far. Send {3 - total_media} more, then say 'done' to continue.")
+            response = f"Got it! We received {accepted_count} new media {self._pluralize(accepted_count, 'file')}. That is {total_media} so far. Send {3 - total_media} more, then say 'done' to continue."
         elif total_media == 3:
-            await whatsapp.send_text(phone, f"That makes {total_media} media files. You can send more or say 'done' to continue.")
+            response = f"That brings us to {total_media} media files. You can send more or say 'done' to continue."
         else:
-            await whatsapp.send_text(phone, f"Received! That is {total_media} files now. Say 'done' whenever you are ready to continue.")
+            response = f"Received! We now have {total_media} media files. Say 'done' whenever you are ready to continue."
+
+        if duplicate_count:
+            response += f" {duplicate_count} duplicate {self._pluralize(duplicate_count, 'file')} {'was' if duplicate_count == 1 else 'were'} skipped."
+        if failed_count:
+            resend_target = 'it' if failed_count == 1 else 'them'
+            response += f" {failed_count} {self._pluralize(failed_count, 'file')} could not be processed, so please resend {resend_target}."
+        await whatsapp.send_text(phone, response)
 
     async def handle_list_legal_rep(self, phone, input_value, *_args):
         legal_phone = format_phone_number(input_value or "")
@@ -882,9 +1061,85 @@ class ChatbotEngine:
         db.add(prop)
         await db.commit()
         await self.clear_session(phone)
+        await self._remember_listing_outcome(phone, PropertyStatus.pending_verification.value)
         await whatsapp.send_text(phone, "Thank you. Your property details, photos, and ownership documents have been submitted successfully. We will verify the details within 24 hours and send you an update here.")
 
-    async def handle_list_documents(self, phone, input_value, message_type, media_id, _user, db):
+    async def handle_list_documents(self, phone, input_value, message_type, media_id, _user, db, media_items=None):
+        data = await self.get_data(phone)
+        doc_urls = data.get("document_urls", [])
+
+        if message_type == "text" and doc_urls:
+            await self.set_state(phone, "LIST_LEGAL_REP")
+            await whatsapp.send_text(phone, "Thank you. Please share the phone number of a legal representative we should keep on this listing.")
+            return
+
+        if self._is_done_message(input_value) or self._is_continue_signal(input_value):
+            if not doc_urls:
+                await whatsapp.send_text(phone, "Please upload at least one ownership document before replying with done.")
+                return
+            await self.set_state(phone, "LIST_LEGAL_REP")
+            await whatsapp.send_text(phone, "Thank you. Please share the phone number of a legal representative we should keep on this listing.")
+            return
+        if message_type in ["image", "video"]:
+            await whatsapp.send_text(phone, "This section is for ownership documents only - PDF, Word, or similar legal files. Photos and videos cannot be accepted here. Please send the document files that prove ownership of this property.")
+            return
+        if message_type != "document" or not media_id:
+            await whatsapp.send_text(phone, "Please upload the ownership document files for this property, then reply with done when you have finished.")
+            return
+        incoming_documents = media_items or [{"type": message_type, "id": media_id}]
+        accepted_count = 0
+        duplicate_count = 0
+        failed_count = 0
+
+        for item in incoming_documents:
+            current_type = item.get("type")
+            current_id = item.get("id")
+            if current_type != "document" or not current_id:
+                failed_count += 1
+                continue
+            media_url = await whatsapp.get_media_url(current_id)
+            if not media_url:
+                failed_count += 1
+                continue
+            media_bytes = await whatsapp.download_media(media_url)
+            if not media_bytes:
+                failed_count += 1
+                continue
+            uploaded = await media_service.upload(media_bytes, resource_type="raw", folder="property_documents")
+            if not uploaded:
+                failed_count += 1
+                continue
+            if uploaded in doc_urls:
+                duplicate_count += 1
+                continue
+            data.setdefault("document_urls", []).append(uploaded)
+            doc_urls.append(uploaded)
+            accepted_count += 1
+
+        if accepted_count:
+            await self.set_data(phone, data)
+
+        batch_token = await self._register_media_batch(phone, "LIST_DOCUMENTS")
+        if not await self._await_media_quiet_period(phone, "LIST_DOCUMENTS", batch_token):
+            return
+
+        if accepted_count == 0 and duplicate_count and not failed_count:
+            await whatsapp.send_text(phone, "Those documents were already received. Please send different document files, or say 'done' to continue.")
+            return
+        if accepted_count == 0 and failed_count:
+            await whatsapp.send_text(phone, "We could not save those documents. Please send them again.")
+            return
+
+        response = "Your document has been received. You may send more, or say 'done' to continue."
+        if accepted_count > 1:
+            response = f"We received {accepted_count} new documents. You may send more, or say 'done' to continue."
+        if duplicate_count:
+            response += f" {duplicate_count} duplicate {self._pluralize(duplicate_count, 'file')} {'was' if duplicate_count == 1 else 'were'} skipped."
+        if failed_count:
+            resend_target = 'it' if failed_count == 1 else 'them'
+            response += f" {failed_count} {self._pluralize(failed_count, 'file')} could not be processed, so please resend {resend_target}."
+        await whatsapp.send_text(phone, response)
+
         data = await self.get_data(phone)
         doc_urls = data.get("document_urls", [])
 
@@ -902,27 +1157,57 @@ class ChatbotEngine:
             await whatsapp.send_text(phone, "Thank you. Please share the phone number of a legal representative we should keep on this listing.")
             return
         if message_type in ["image", "video"]:
-            await whatsapp.send_text(phone, "This section is for ownership documents only — PDF, Word, or similar legal files. Photos and videos cannot be accepted here. Please send the document files that prove ownership of this property.")
+            await whatsapp.send_text(phone, "This section is for ownership documents only - PDF, Word, or similar legal files. Photos and videos cannot be accepted here. Please send the document files that prove ownership of this property.")
             return
         if message_type != "document" or not media_id:
             await whatsapp.send_text(phone, "Please upload the ownership document files for this property, then reply with done when you have finished.")
             return
-        media_url = await whatsapp.get_media_url(media_id)
-        if not media_url:
-            await whatsapp.send_text(phone, "We could not retrieve that document. Please send it again.")
+        incoming_documents = media_items or [{"type": message_type, "id": media_id}]
+        accepted_count = 0
+        duplicate_count = 0
+        failed_count = 0
+
+        for item in incoming_documents:
+            current_type = item.get("type")
+            current_id = item.get("id")
+            if current_type != "document" or not current_id:
+                failed_count += 1
+                continue
+            media_url = await whatsapp.get_media_url(current_id)
+            if not media_url:
+                failed_count += 1
+                continue
+            media_bytes = await whatsapp.download_media(media_url)
+            if not media_bytes:
+                failed_count += 1
+                continue
+            uploaded = await media_service.upload(media_bytes, resource_type="raw", folder="property_documents")
+            if not uploaded:
+                failed_count += 1
+                continue
+            if uploaded in doc_urls:
+                duplicate_count += 1
+                continue
+            data.setdefault("document_urls", []).append(uploaded)
+            doc_urls.append(uploaded)
+            accepted_count += 1
+
+        if accepted_count:
+            await self.set_data(phone, data)
+
+        if accepted_count == 0 and duplicate_count and not failed_count:
+            await whatsapp.send_text(phone, "Those documents were already received. Please send different document files, or say 'done' to continue.")
             return
-        media_bytes = await whatsapp.download_media(media_url)
-        if not media_bytes:
-            await whatsapp.send_text(phone, "We could not download that document. Please try again.")
+        if accepted_count == 0 and failed_count:
+            await whatsapp.send_text(phone, "We could not save those documents. Please send them again.")
             return
-        uploaded = await media_service.upload(media_bytes, resource_type="raw", folder="property_documents")
-        if not uploaded:
-            await whatsapp.send_text(phone, "We could not save that document. Please try again.")
-            return
-        # Check for duplicate
-        if uploaded in doc_urls:
-            await whatsapp.send_text(phone, "That document was already received. Please send a different document, or say 'done' to continue.")
-            return
-        data.setdefault("document_urls", []).append(uploaded)
-        await self.set_data(phone, data)
-        await whatsapp.send_text(phone, "Your document has been received. You may send more, or say 'done' to continue.")
+
+        response = "Your document has been received. You may send more, or say 'done' to continue."
+        if accepted_count > 1:
+            response = f"We received {accepted_count} new documents. You may send more, or say 'done' to continue."
+        if duplicate_count:
+            response += f" {duplicate_count} duplicate {self._pluralize(duplicate_count, 'file')} {'was' if duplicate_count == 1 else 'were'} skipped."
+        if failed_count:
+            resend_target = 'it' if failed_count == 1 else 'them'
+            response += f" {failed_count} {self._pluralize(failed_count, 'file')} could not be processed, so please resend {resend_target}."
+        await whatsapp.send_text(phone, response)
