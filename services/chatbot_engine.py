@@ -622,48 +622,115 @@ class ChatbotEngine:
         media_id,
         message_id: str,
         db,
-        media_items: list | None = None,   # ← must be here
-        message_ids: list | None = None,   # ← must be here
+        media_items: list | None = None,
+        message_ids: list | None = None,
     ) -> None:
-
-        await whatsapp.mark_as_read(message_id)
+        read_ids = [mid for mid in (message_ids or [message_id]) if mid]
+        for mid in read_ids:
+            await whatsapp.mark_as_read(mid)
         user = await self._get_or_create_user(phone, db)
+        phone = format_phone_number(phone)
+        active_state = await self.redis.get(self._state_key(phone))
         state = await self.get_state(phone)
+        data = await self.get_data(phone)
         input_value = button_id or (text.strip() if text else None)
+        normalized = self._normalize_text(input_value)
+        recent_context = await self._get_recent_context(phone)
 
-        # Global shortcuts
-        if input_value and input_value.upper() in ["MENU", "HOME", "START", "HI", "HELLO"]:
+        if normalized in ["menu", "home", "start"]:
             await self.clear_session(phone)
             await self.send_main_menu(phone, user)
             return
 
-        if input_value and input_value.upper() in ["CANCEL", "STOP", "BACK"]:
+        if normalized in ["cancel", "stop", "back"]:
             await self.clear_session(phone)
+            await self.send_main_menu(phone, user)
+            return
+
+        media_items = media_items or ([{"type": message_type, "id": media_id}] if message_type in ["image", "video", "document"] and media_id else None)
+        incoming_media_types = {item.get("type") for item in (media_items or []) if item.get("type")}
+        if incoming_media_types:
+            if state not in {"LIST_PHOTOS", "LIST_DOCUMENTS"}:
+                await self._handle_unexpected_media(phone, state, data, incoming_media_types)
+                return
+            if state == "LIST_PHOTOS" and "document" in incoming_media_types:
+                await self._handle_unexpected_media(phone, state, data, incoming_media_types)
+                return
+            if state == "LIST_DOCUMENTS" and any(media_type in {"image", "video"} for media_type in incoming_media_types):
+                await self._handle_unexpected_media(phone, state, data, incoming_media_types)
+                return
+
+        if await self._handle_recent_context_message(phone, input_value, recent_context, active_state):
+            return
+
+        if await self._handle_idle_courtesy_message(phone, input_value, active_state):
+            return
+
+        intent_decision = await intent_service.detect_intent(input_value if not button_id else button_id, state)
+        intent = intent_decision.intent
+
+        if self._is_greeting(input_value) and not active_state and state != "MAIN_MENU":
+            await self._offer_resume_or_restart(phone, user, state, data)
+            return
+
+        if state == RESUME_PROMPT_STATE:
+            await self.handle_resume_prompt(phone, input_value, user, db)
+            return
+
+        if intent == "customer_service" or self._is_customer_service_request(input_value):
+            await self._open_customer_service(phone, state, data, db)
+            return
+
+        if intent == "search_property" and state not in SEARCH_FLOW_STATES and state not in LISTING_FLOW_STATES:
+            await self._start_property_search(phone)
+            return
+
+        if intent == "list_property" and state not in LISTING_FLOW_STATES:
+            await self._start_property_listing(phone, user)
+            return
+
+        if intent == "my_account" and state == "MAIN_MENU":
+            await whatsapp.send_text(phone, "We can help with account and booking support. Please tell us what you would like to check, or choose an option below to continue.")
             await self.send_main_menu(phone, user)
             return
 
         handler_map = {
-            "MAIN_MENU":          self.handle_main_menu,
-            "SEARCH_LOCATION":    self.handle_search_location,
-            # ... all your other states ...
-            "LIST_PHOTOS":        self.handle_list_photos,
+            "MAIN_MENU": self.handle_main_menu,
+            "SEARCH_LOCATION": self.handle_search_location,
+            "SEARCH_BUDGET": self.handle_search_budget,
+            "SEARCH_TYPE": self.handle_search_type,
+            "SEARCH_BEDROOMS": self.handle_search_bedrooms,
+            "VIEW_RESULTS": self.handle_view_results,
+            "VIEW_PROPERTY": self.handle_view_property,
+            "SCHEDULE_DATE": self.handle_schedule_date,
+            "SCHEDULE_CONFIRM": self.handle_schedule_confirm,
+            "AWAIT_PAYMENT": self.handle_await_payment,
+            CUSTOMER_SERVICE_STATE: self.handle_customer_service,
+            "LIST_TITLE": self.handle_list_title,
+            "LIST_ADDRESS": self.handle_list_address,
+            "LIST_NEIGHBOURHOOD": self.handle_list_neighbourhood,
+            "LIST_CITY": self.handle_list_city,
+            "LIST_STATE": self.handle_list_state,
+            "LIST_TYPE": self.handle_list_type,
+            "LIST_BEDROOMS": self.handle_list_bedrooms,
+            LIST_BEDROOMS_CUSTOM_STATE: self.handle_list_bedrooms_custom,
+            "LIST_RENT": self.handle_list_rent,
+            "LIST_AMENITIES": self.handle_list_amenities,
+            "LIST_PHOTOS": self.handle_list_photos,
+            "LIST_DOCUMENTS": self.handle_list_documents,
+            "LIST_LEGAL_REP": self.handle_list_legal_rep,
+            "LIST_USER_NAME": self.handle_list_user_name,
+            "LIST_USER_PHONE": self.handle_list_user_phone,
         }
 
         handler = handler_map.get(state, self.handle_main_menu)
-
-        # Pass media_items to every handler
-        # Handlers that don't need it just ignore it
-        await handler(
-            phone,
-            input_value,
-            message_type,
-            media_id,
-            user,
-            db,
-            media_items=media_items,      # ← pass it through
-            message_ids=message_ids,
-        )
-
+        if state == "LIST_PHOTOS":
+            await handler(phone, input_value, message_type, media_id, user, db, media_items)
+            return
+        if state == "LIST_DOCUMENTS":
+            await handler(phone, input_value, message_type, media_id, user, db, media_items)
+            return
+        await handler(phone, input_value, message_type, media_id, user, db)
 
     def _is_new_start_signal(self, input_value: str | None) -> bool:
         """Detect free-text signals meaning the user wants a fresh start."""
