@@ -55,3 +55,59 @@ class TestWebhookEndpoints:
     async def test_webhook_post_always_200(self, client):
         response = await client.post("/api/v1/webhook/whatsapp", json={})
         assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_webhook_batches_related_media_from_same_payload(self, client, monkeypatch):
+        calls = []
+
+        async def fake_get_redis():
+            return object()
+
+        async def fake_process_message(self, **kwargs):
+            calls.append(kwargs)
+
+        monkeypatch.setattr("api.v1.endpoints.webhook.get_redis", fake_get_redis)
+        monkeypatch.setattr("api.v1.endpoints.webhook.ChatbotEngine.process_message", fake_process_message)
+
+        response = await client.post(
+            "/api/v1/webhook/whatsapp",
+            json={
+                "entry": [{
+                    "changes": [{
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "2348012345678",
+                                    "id": "wamid.image-1",
+                                    "type": "image",
+                                    "image": {"id": "media-1"},
+                                },
+                                {
+                                    "from": "2348012345678",
+                                    "id": "wamid.text-1",
+                                    "type": "text",
+                                    "text": {"body": "caption filler"},
+                                },
+                                {
+                                    "from": "2348012345678",
+                                    "id": "wamid.image-2",
+                                    "type": "image",
+                                    "context": {"id": "wamid.image-1"},
+                                    "image": {"id": "media-2"},
+                                },
+                            ],
+                        },
+                    }],
+                }],
+            },
+        )
+
+        assert response.status_code == 200
+        assert len(calls) == 2
+        assert calls[0]["message_type"] == "image"
+        assert calls[0]["message_ids"] == ["wamid.image-1", "wamid.image-2"]
+        assert calls[0]["media_items"] == [
+            {"type": "image", "id": "media-1"},
+            {"type": "image", "id": "media-2"},
+        ]
+        assert calls[1]["message_type"] == "text"

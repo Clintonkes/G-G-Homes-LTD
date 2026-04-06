@@ -7,7 +7,7 @@ import httpx
 
 from core.config import settings
 
-ALLOWED_INTENTS = {"search_property", "list_property", "my_account", "continue", "unknown"}
+ALLOWED_INTENTS = {"search_property", "list_property", "my_account", "customer_service", "continue", "unknown"}
 SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_TYPE", "LIST_BEDROOMS", "LIST_RENT", "LIST_AMENITIES", "LIST_PHOTOS"}
 
@@ -61,12 +61,31 @@ class IntentService:
             "search property",
         ]
         account_terms = ["account", "profile", "my details", "my booking", "my appointment"]
+        customer_service_terms = [
+            "customer service",
+            "customer care",
+            "customer support",
+            "support team",
+            "help desk",
+            "complaint",
+            "issue with my account",
+            "issue with my booking",
+            "issue with my listing",
+            "speak to support",
+            "talk to support",
+            "human agent",
+            "live agent",
+            "customer representative",
+        ]
 
         is_listing = self._contains_any(normalized, listing_terms)
         is_search = self._contains_any(normalized, search_terms)
         is_account = self._contains_any(normalized, account_terms)
+        is_customer_service = self._contains_any(normalized, customer_service_terms)
 
         if current_state in LISTING_FLOW_STATES:
+            if is_customer_service:
+                return IntentDecision(intent="customer_service", confidence=0.86, source="fallback")
             if is_search:
                 return IntentDecision(intent="search_property", confidence=0.9, source="fallback")
             if is_account:
@@ -74,6 +93,8 @@ class IntentService:
             return IntentDecision(intent="continue", confidence=0.95, source="fallback")
 
         if current_state in SEARCH_FLOW_STATES:
+            if is_customer_service:
+                return IntentDecision(intent="customer_service", confidence=0.86, source="fallback")
             if is_listing:
                 return IntentDecision(intent="list_property", confidence=0.92, source="fallback")
             if is_account:
@@ -86,6 +107,8 @@ class IntentService:
             return IntentDecision(intent="search_property", confidence=0.88, source="fallback")
         if is_account:
             return IntentDecision(intent="my_account", confidence=0.8, source="fallback")
+        if is_customer_service:
+            return IntentDecision(intent="customer_service", confidence=0.84, source="fallback")
 
         if current_state != "MAIN_MENU":
             return IntentDecision(intent="continue", confidence=0.65, source="fallback")
@@ -98,9 +121,10 @@ class IntentService:
         system_prompt = (
             "You classify WhatsApp real-estate assistant messages into a small set of intents. "
             "Return strict JSON with keys: intent, confidence. "
-            "Allowed intents: search_property, list_property, my_account, continue, unknown. "
+            "Allowed intents: search_property, list_property, my_account, customer_service, continue, unknown. "
             "Respect the current workflow. If the user is already in a listing workflow and their message answers the current step, return continue. "
             "If the user is already in a property-search workflow and their message answers the current step, return continue. "
+            "If the user is asking for customer service, support, a complaint path, or a human/support team, return customer_service. "
             "Only switch to list_property or search_property when the user clearly wants to change direction."
         )
         user_prompt = (

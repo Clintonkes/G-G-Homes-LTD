@@ -12,6 +12,80 @@ from services.whatsapp_service import whatsapp
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+MEDIA_MESSAGE_TYPES = {"image", "video", "document"}
+MEDIA_CONTAINER_KEYS = ("media_group_id", "container_id", "parent_id", "id", "message_id")
+
+
+def _media_kind(message_type: str) -> str | None:
+    if message_type in {"image", "video"}:
+        return "visual"
+    if message_type == "document":
+        return "document"
+    return None
+
+
+def _message_relationship_refs(message: dict) -> set[str]:
+    refs: set[str] = set()
+    msg_id = message.get("id")
+    if msg_id:
+        refs.add(str(msg_id))
+
+    context = message.get("context") or {}
+    for key in MEDIA_CONTAINER_KEYS:
+        value = context.get(key)
+        if value:
+            refs.add(str(value))
+
+    message_type = message.get("type", "")
+    media_payload = message.get(message_type) or {}
+    if isinstance(media_payload, dict):
+        for key in MEDIA_CONTAINER_KEYS:
+            value = media_payload.get(key)
+            if value:
+                refs.add(str(value))
+
+    return refs
+
+
+def _build_media_batch(messages: list[dict], start_index: int, consumed_indexes: set[int]) -> tuple[list[dict], list[str], int]:
+    start_message = messages[start_index]
+    phone = start_message.get("from", "")
+    batch_kind = _media_kind(start_message.get("type", ""))
+    if batch_kind is None:
+        return [], [], start_index + 1
+
+    media_items: list[dict] = []
+    message_ids: list[str] = []
+    related_refs = _message_relationship_refs(start_message)
+    last_grouped_index = start_index
+
+    for index in range(start_index, len(messages)):
+        if index in consumed_indexes:
+            continue
+        candidate = messages[index]
+        candidate_phone = candidate.get("from", "")
+        candidate_type = candidate.get("type", "")
+        candidate_kind = _media_kind(candidate_type)
+        if candidate_phone != phone or candidate_kind != batch_kind:
+            continue
+
+        candidate_refs = _message_relationship_refs(candidate)
+        same_container = bool(related_refs & candidate_refs)
+        contiguous_match = index == last_grouped_index + 1
+        if index != start_index and not same_container and not contiguous_match:
+            continue
+
+        candidate_media_id = (candidate.get(candidate_type) or {}).get("id")
+        if candidate_media_id:
+            media_items.append({"type": candidate_type, "id": candidate_media_id})
+        candidate_message_id = candidate.get("id", "")
+        if candidate_message_id and candidate_message_id not in message_ids:
+            message_ids.append(candidate_message_id)
+        related_refs.update(candidate_refs)
+        consumed_indexes.add(index)
+        last_grouped_index = index
+
+    return media_items, message_ids, start_index + 1
 
 
 @router.get("/whatsapp")
@@ -38,8 +112,13 @@ async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(
         redis = await get_redis()
         engine = ChatbotEngine(redis_client=redis)
 
+        consumed_indexes: set[int] = set()
         index = 0
         while index < len(messages):
+            if index in consumed_indexes:
+                index += 1
+                continue
+
             msg = messages[index]
             msg_id = msg.get("id", "")
             phone = msg.get("from", "")
@@ -52,6 +131,7 @@ async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(
 
             if msg_type == "text":
                 text = msg.get("text", {}).get("body", "")
+
             elif msg_type == "interactive":
                 interactive = msg.get("interactive", {})
                 itype = interactive.get("type", "")
@@ -59,36 +139,33 @@ async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(
                     button_id = interactive.get("button_reply", {}).get("id")
                 elif itype == "list_reply":
                     button_id = interactive.get("list_reply", {}).get("id")
-            elif msg_type in ["image", "video", "document"]:
-                batch_kind = "visual" if msg_type in ["image", "video"] else "document"
-                media_items = []
-                while index < len(messages):
-                    batch_msg = messages[index]
-                    batch_phone = batch_msg.get("from", "")
-                    batch_type = batch_msg.get("type", "")
-                    next_kind = "visual" if batch_type in ["image", "video"] else "document" if batch_type == "document" else None
-                    if batch_phone != phone or next_kind != batch_kind:
-                        break
-                    batch_media_id = batch_msg.get(batch_type, {}).get("id")
-                    if batch_media_id:
-                        media_items.append({"type": batch_type, "id": batch_media_id})
-                    batch_msg_id = batch_msg.get("id", "")
-                    if batch_msg_id and batch_msg_id not in message_ids:
-                        message_ids.append(batch_msg_id)
-                    index += 1
+
+            elif msg_type in MEDIA_MESSAGE_TYPES:
+                # Build the full batch of related media messages
+                media_items, message_ids, _ = _build_media_batch(
+                    messages, index, consumed_indexes
+                )
+                # Pass ALL media items — engine handles all of them
                 media_id = media_items[0]["id"] if media_items else None
+
+                # Advance index past ALL consumed messages in this batch
+                if consumed_indexes:
+                    index = max(consumed_indexes) + 1
+                else:
+                    index += 1
+
                 await engine.process_message(
                     phone=phone,
                     message_type=msg_type,
                     text=text,
                     button_id=button_id,
                     media_id=media_id,
-                    media_items=media_items,
+                    media_items=media_items,  # ← full batch
                     message_id=msg_id,
                     message_ids=message_ids,
                     db=db,
                 )
-                continue
+                continue  # skip the index += 1 at the bottom
 
             await engine.process_message(
                 phone=phone,
@@ -102,11 +179,17 @@ async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(
                 db=db,
             )
             index += 1
+
     except Exception as exc:
         logger.error("Webhook error: %s", exc, exc_info=True)
         if phone:
             try:
-                await whatsapp.send_text(phone, "We ran into a small issue while processing that last message. Please send it again, or type menu and we will guide you from the beginning.")
+                await whatsapp.send_text(
+                    phone,
+                    "We ran into a small issue processing that message. "
+                    "Please send it again, or type menu to start over."
+                )
             except Exception:
-                logger.warning("Failed to send fallback WhatsApp message", exc_info=True)
+                logger.warning("Failed to send fallback message", exc_info=True)
+
     return {"status": "ok"}

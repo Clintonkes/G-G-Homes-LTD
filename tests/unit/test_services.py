@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.security import create_access_token, decode_access_token, hash_password, verify_password
+from database.models import User, UserRole
 from services.chatbot_engine import ChatbotEngine
 from services.property_service import PropertyService
 
@@ -189,3 +190,66 @@ class TestChatbotMediaBatching:
         assert send_text.await_count == 1
         assert "awaiting verification" in send_text.await_args.args[1]
         send_buttons.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_idle_nice_job_gets_polite_close_not_welcome(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        send_buttons = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_buttons", send_buttons)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="nice job",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert send_text.await_count == 1
+        assert "whenever you need us" in send_text.await_args.args[1].lower()
+        send_buttons.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_customer_service_request_enters_support_flow(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="I need customer service",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "CUSTOMER_SERVICE"
+        assert send_text.await_count == 1
+        assert "customer service is ready to help" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_main_menu_uses_list_with_customer_service(self, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        user = User(full_name="Ada Lovelace", phone_number="2348012345678", role=UserRole.tenant)
+        send_list = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+
+        await engine.send_main_menu("2348012345678", user)
+
+        assert send_list.await_count == 1
+        args = send_list.await_args.args
+        assert "6. Customer service" in args[1]
+        rows = args[3][0]["rows"]
+        assert any(row["id"] == "customer_service" and row["title"] == "Customer Service" for row in rows)
