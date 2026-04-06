@@ -724,13 +724,19 @@ class ChatbotEngine:
         }
 
         handler = handler_map.get(state, self.handle_main_menu)
-        if state == "LIST_PHOTOS":
-            await handler(phone, input_value, message_type, media_id, user, db, media_items)
-            return
-        if state == "LIST_DOCUMENTS":
-            await handler(phone, input_value, message_type, media_id, user, db, media_items)
-            return
-        await handler(phone, input_value, message_type, media_id, user, db)
+
+        # Always pass media_items as keyword argument
+        # Handlers that need it use it, others absorb it via **kwargs
+        await handler(
+            phone,
+            input_value,
+            message_type,
+            media_id,
+            user,
+            db,
+            media_items=media_items,
+            message_ids=message_ids,
+        )
 
     def _is_new_start_signal(self, input_value: str | None) -> bool:
         """Detect free-text signals meaning the user wants a fresh start."""
@@ -778,7 +784,7 @@ class ChatbotEngine:
             ],
         )
 
-    async def handle_main_menu(self, phone, input_value, _message_type, _media_id, user, _db):
+    async def handle_main_menu(self, phone, input_value, _message_type, _media_id, user, _db, **kwargs):
         intent = (await intent_service.detect_intent(input_value, "MAIN_MENU")).intent
         if intent == "search_property":
             await self._start_property_search(phone)
@@ -796,7 +802,7 @@ class ChatbotEngine:
         await whatsapp.send_text(phone, "We are here to help. Please choose one of the options below, or tell us whether you would like to find a home, list a property, or check your account.")
         await self.send_main_menu(phone, user)
 
-    async def handle_customer_service(self, phone, input_value, _message_type, _media_id, user, db):
+    async def handle_customer_service(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
         data = await self.get_data(phone)
         previous_state = data.get("support_previous_state", "MAIN_MENU")
         previous_data = data.get("support_previous_data", {})
@@ -828,14 +834,16 @@ class ChatbotEngine:
             return
         await whatsapp.send_text(phone, "Customer service can help with listing updates, booking questions, account support, and finding a property. Please tell us which one you need, or say continue to resume your previous conversation.")
 
-    async def handle_search_location(self, phone, input_value, *_args):
+
+    async def handle_search_location(self, phone, input_value, *_args, **kwargs):
         data = await self.get_data(phone)
         data["neighbourhood"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "SEARCH_BUDGET")
         await self._send_search_budget_options(phone)
 
-    async def handle_search_budget(self, phone, input_value, *_args):
+
+    async def handle_search_budget(self, phone, input_value, *_args,**kwargs):
         data = await self.get_data(phone)
         if input_value == "budget_flexible":
             data["max_rent"] = None
@@ -860,7 +868,8 @@ class ChatbotEngine:
             }],
         )
 
-    async def handle_search_type(self, phone, input_value, _message_type, _media_id, _user, db):
+
+    async def handle_search_type(self, phone, input_value, _message_type, _media_id, _user, db,**kwargs):
         data = await self.get_data(phone)
         data["property_type"] = input_value
         data.pop("bedrooms", None)
@@ -872,7 +881,8 @@ class ChatbotEngine:
             return
         await self._send_search_results(phone, data, db)
 
-    async def handle_search_bedrooms(self, phone, input_value, _message_type, _media_id, _user, db):
+
+    async def handle_search_bedrooms(self, phone, input_value, _message_type, _media_id, _user, db,**kwargs):
         data = await self.get_data(phone)
         data.pop("bedrooms", None)
         data.pop("min_bedrooms", None)
@@ -886,7 +896,8 @@ class ChatbotEngine:
         await self.set_data(phone, data)
         await self._send_search_results(phone, data, db)
 
-    async def handle_view_results(self, phone, input_value, _message_type, _media_id, _user, db):
+
+    async def handle_view_results(self, phone, input_value, _message_type, _media_id, _user, db, **kwargs):
         if not input_value or not input_value.isdigit():
             await whatsapp.send_text(phone, "Please reply with the number of the property you would like us to open for you, or tell us if you would prefer to start a fresh search or list a property.")
             return
@@ -911,14 +922,16 @@ class ChatbotEngine:
             [{"id": "schedule_visit", "title": "Book Inspection"}],
         )
 
-    async def handle_view_property(self, phone, input_value, *_args):
+
+    async def handle_view_property(self, phone, input_value, *_args, **kwargs):
         if input_value == "schedule_visit":
             await self.set_state(phone, "SCHEDULE_DATE")
             await whatsapp.send_text(phone, "Excellent choice. Please share your preferred inspection date and time. Example: 15/07/2026 10:00")
             return
         await whatsapp.send_text(phone, "When you are ready, tap Book Inspection and we will help you schedule the visit right away.")
 
-    async def handle_schedule_date(self, phone, input_value, _message_type, _media_id, _user, db):
+
+    async def handle_schedule_date(self, phone, input_value, _message_type, _media_id, _user, db, **kwargs):
         try:
             scheduled_date = datetime.strptime(input_value, "%d/%m/%Y %H:%M")
         except Exception:
@@ -931,7 +944,8 @@ class ChatbotEngine:
         await self.set_state(phone, "SCHEDULE_CONFIRM")
         await whatsapp.send_buttons(phone, f"Kindly confirm your inspection for {prop.title} on {scheduled_date:%d/%m/%Y %H:%M}.", [{"id": "confirm_booking", "title": "Confirm"}])
 
-    async def handle_schedule_confirm(self, phone, input_value, _message_type, _media_id, user, db):
+
+    async def handle_schedule_confirm(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
         if input_value != "confirm_booking":
             await whatsapp.send_text(phone, "Please tap Confirm when you are ready, and we will finalize the inspection booking for you.")
             return
@@ -950,38 +964,44 @@ class ChatbotEngine:
         await self.clear_session(phone)
         await whatsapp.send_text(phone, "Your inspection has been confirmed successfully. Our team has notified the landlord, and we look forward to assisting you further.")
 
-    async def handle_await_payment(self, phone, *_args):
+
+    async def handle_await_payment(self, phone, *_args, **kwargs):
         await whatsapp.send_text(phone, "Your payment is currently being verified. We will update you as soon as confirmation is received.")
 
-    async def handle_list_title(self, phone, input_value, *_args):
+
+    async def handle_list_title(self, phone, input_value, *_args, **kwargs):
         data = await self.get_data(phone)
         data["title"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_ADDRESS")
         await whatsapp.send_text(phone, "Thank you. Please share the property address.")
 
-    async def handle_list_address(self, phone, input_value, *_args):
+
+    async def handle_list_address(self, phone, input_value, *_args, **kwargs):
         data = await self.get_data(phone)
         data["address"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_NEIGHBOURHOOD")
         await whatsapp.send_text(phone, "Kindly share the neighbourhood and a nearby landmark for this property.")
 
-    async def handle_list_neighbourhood(self, phone, input_value, *_args):
+
+    async def handle_list_neighbourhood(self, phone, input_value, *_args, **kwargs):
         data = await self.get_data(phone)
         data["neighbourhood"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_CITY")
         await whatsapp.send_text(phone, "Please share the city where the property is located.")
 
-    async def handle_list_city(self, phone, input_value, *_args):
+
+    async def handle_list_city(self, phone, input_value, *_args, **kwargs):
         data = await self.get_data(phone)
         data["city"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_STATE")
         await whatsapp.send_text(phone, "Please share the state where the property is located.")
 
-    async def handle_list_state(self, phone, input_value, *_args):
+
+    async def handle_list_state(self, phone, input_value, *_args, **kwargs):
         data = await self.get_data(phone)
         data["state"] = input_value
         await self.set_data(phone, data)
@@ -993,7 +1013,8 @@ class ChatbotEngine:
             [{"title": "Property Types", "rows": [{"id": item.value, "title": item.value.replace("_", " ").title()} for item in PropertyType if item != PropertyType.room_and_parlour]}],
         )
 
-    async def handle_list_type(self, phone, input_value, *_args):
+
+    async def handle_list_type(self, phone, input_value, *_args, **kwargs):
         data = await self.get_data(phone)
         data["property_type"] = input_value
         await self.set_data(phone, data)
@@ -1006,7 +1027,8 @@ class ChatbotEngine:
         await self.set_state(phone, "LIST_BEDROOMS")
         await self._send_listing_bedroom_options(phone)
 
-    async def handle_list_bedrooms(self, phone, input_value, *_args):
+
+    async def handle_list_bedrooms(self, phone, input_value, *_args, **kwargs):
         data = await self.get_data(phone)
         if input_value == "list_beds_4_plus":
             await self.set_state(phone, LIST_BEDROOMS_CUSTOM_STATE)
@@ -1020,7 +1042,8 @@ class ChatbotEngine:
         await self.set_state(phone, "LIST_RENT")
         await whatsapp.send_text(phone, "Please enter the annual rent amount in naira. You can write it as 500000 or 500,000.")
 
-    async def handle_list_bedrooms_custom(self, phone, input_value, *_args):
+
+    async def handle_list_bedrooms_custom(self, phone, input_value, *_args, **kwargs):
         try:
             bedrooms = int((input_value or "").strip())
             if bedrooms < 4:
@@ -1034,7 +1057,8 @@ class ChatbotEngine:
         await self.set_state(phone, "LIST_RENT")
         await whatsapp.send_text(phone, "Please enter the annual rent amount in naira. You can write it as 500000 or 500,000.")
 
-    async def handle_list_rent(self, phone, input_value, *_args):
+
+    async def handle_list_rent(self, phone, input_value, *_args, **kwargs):
         try:
             annual_rent = parse_naira_amount(input_value or "")
         except ValueError:
@@ -1046,7 +1070,8 @@ class ChatbotEngine:
         await self.set_state(phone, "LIST_AMENITIES")
         await whatsapp.send_text(phone, "Please list the amenities, separated by commas.")
 
-    async def handle_list_amenities(self, phone, input_value, *_args):
+
+    async def handle_list_amenities(self, phone, input_value, *_args, **kwargs):
         if self._is_clarification_request(input_value):
             await whatsapp.send_text(phone, "Amenities are the useful features that come with the property, such as water supply, prepaid meter, POP finishing, fenced compound, parking space, security, or wardrobes. Please list the available amenities, separated by commas.")
             return
@@ -1058,6 +1083,7 @@ class ChatbotEngine:
         await self.set_state(phone, "LIST_PHOTOS")
         await whatsapp.send_text(phone, "You can now send property photos or videos. Please send at least 3 clear photos or videos of the property. When you are done, simply say done and we will proceed.")
 
+
     async def handle_list_photos(
         self,
         phone: str,
@@ -1066,8 +1092,9 @@ class ChatbotEngine:
         media_id,
         user,
         db,
-        media_items: list | None = None,   # ← add this parameter
+        media_items: list | None = None,
         message_ids: list | None = None,
+        **kwargs,                           # absorb anything else
     ) -> None:
         """Handle photo/video uploads from landlord during listing wizard."""
 
@@ -1105,10 +1132,6 @@ class ChatbotEngine:
                     "Type *DONE* when finished."
                 )
             return
-
-        # Process every item in the batch
-        from app.services.media_service import MediaService
-        media_service = MediaService()
 
         data = await self.get_data(phone)
         photo_urls: list = data.get("photo_urls", [])
@@ -1153,10 +1176,9 @@ class ChatbotEngine:
             newly_uploaded += 1
 
         # Save all newly uploaded URLs back to session
-        await self.update_data(phone, {
-            "photo_urls": photo_urls,
-            "video_urls": video_urls,
-        })
+        data["photo_urls"] = photo_urls
+        data["video_urls"] = video_urls
+        await self.set_data(phone, data)
 
         # Build a clear summary message
         total = len(photo_urls) + len(video_urls)
@@ -1191,7 +1213,7 @@ class ChatbotEngine:
         await whatsapp.send_text(phone, "\n".join(summary_lines))
 
 
-    async def handle_list_legal_rep(self, phone, input_value, *_args):
+    async def handle_list_legal_rep(self, phone, input_value, *_args, **kwargs):
         legal_phone = format_phone_number(input_value or "")
         if len(legal_phone) < 13:
             await whatsapp.send_text(phone, "Please send a valid phone number with 11 digits, for example 08012345678.")
@@ -1202,7 +1224,8 @@ class ChatbotEngine:
         await self.set_state(phone, "LIST_USER_NAME")
         await whatsapp.send_text(phone, "Please share your full name so we can complete the property record.")
 
-    async def handle_list_user_name(self, phone, input_value, *_args):
+
+    async def handle_list_user_name(self, phone, input_value, *_args, **kwargs):
         full_name = (input_value or "").strip()
         if len(full_name.split()) < 2:
             await whatsapp.send_text(phone, "Please share your full name, for example Firstname Lastname.")
@@ -1213,7 +1236,8 @@ class ChatbotEngine:
         await self.set_state(phone, "LIST_USER_PHONE")
         await whatsapp.send_text(phone, "Please share your phone number so we can reach you if needed.")
 
-    async def handle_list_user_phone(self, phone, input_value, _message_type, _media_id, _user, db):
+
+    async def handle_list_user_phone(self, phone, input_value, _message_type, _media_id, _user, db, **kwargs):
         user_phone = format_phone_number(input_value or "")
         if len(user_phone) < 13:
             await whatsapp.send_text(phone, "Please send a valid phone number with 11 digits, for example 08012345678.")
@@ -1250,6 +1274,7 @@ class ChatbotEngine:
         await self.clear_session(phone)
         await self._remember_listing_outcome(phone, PropertyStatus.pending_verification.value)
         await whatsapp.send_text(phone, "Thank you. Your property details, photos, and ownership documents have been submitted successfully. We will verify the details within 24 hours and send you an update here.")
+
 
     async def handle_list_documents(self, phone, input_value, message_type, media_id, _user, db, media_items=None):
         data = await self.get_data(phone)
