@@ -408,7 +408,22 @@ class ChatbotEngine:
         await self._save_resume_snapshot(phone, state, data)
 
     async def clear_session(self, phone: str) -> None:
-        await self.redis.delete(self._state_key(phone), self._data_key(phone), self._resume_key(phone))
+        await self.redis.delete(
+            self._state_key(phone),
+            self._data_key(phone),
+            self._resume_key(phone),
+            self._media_batch_key(phone, "LIST_PHOTOS"),
+            self._media_batch_key(phone, "LIST_DOCUMENTS"),
+            f"media_accum:photo_urls:{phone}",
+            f"media_accum:video_urls:{phone}",
+            f"media_accum:document_urls:{phone}",
+        )
+
+    async def reset_conversation(self, phone: str, clear_recent_context: bool = False) -> None:
+        await self.clear_session(phone)
+        if clear_recent_context:
+            await self.redis.delete(self._recent_context_key(phone))
+
 
     async def _get_or_create_user(self, phone: str, db: AsyncSession) -> User:
         phone = format_phone_number(phone)
@@ -638,12 +653,17 @@ class ChatbotEngine:
         recent_context = await self._get_recent_context(phone)
 
         if normalized in ["menu", "home", "start"]:
-            await self.clear_session(phone)
+            await self.reset_conversation(phone, clear_recent_context=True)
             await self.send_main_menu(phone, user)
             return
 
         if normalized in ["cancel", "stop", "back"]:
-            await self.clear_session(phone)
+            await self.reset_conversation(phone, clear_recent_context=True)
+            await self.send_main_menu(phone, user)
+            return
+
+        if self._is_new_start_signal(input_value):
+            await self.reset_conversation(phone, clear_recent_context=True)
             await self.send_main_menu(phone, user)
             return
 
@@ -725,18 +745,13 @@ class ChatbotEngine:
 
         handler = handler_map.get(state, self.handle_main_menu)
 
-        # Always pass media_items as keyword argument
-        # Handlers that need it use it, others absorb it via **kwargs
-        await handler(
-            phone,
-            input_value,
-            message_type,
-            media_id,
-            user,
-            db,
-            media_items=media_items,
-            message_ids=message_ids,
-        )
+        if state == "LIST_PHOTOS":
+            await handler(phone, input_value, message_type, media_id, user, db, media_items)
+            return
+        if state == "LIST_DOCUMENTS":
+            await handler(phone, input_value, message_type, media_id, user, db, media_items)
+            return
+        await handler(phone, input_value, message_type, media_id, user, db)
 
     def _is_new_start_signal(self, input_value: str | None) -> bool:
         """Detect free-text signals meaning the user wants a fresh start."""
@@ -772,7 +787,7 @@ class ChatbotEngine:
             await self._prompt_for_state(phone, target_state, target_data, db)
             return
         if is_new:
-            await self.clear_session(phone)
+            await self.reset_conversation(phone, clear_recent_context=True)
             await self.send_main_menu(phone, user)
             return
         await whatsapp.send_buttons(
@@ -1113,6 +1128,9 @@ class ChatbotEngine:
             await whatsapp.send_text(phone, "Perfect! Your photos look great. Now please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
             return
 
+        if not input_value and message_type not in ["image", "video"]:
+            return
+
         if message_type not in ["image", "video"] or not media_id:
             msg = "Please send a property image or video."
             if total_media > 0:
@@ -1267,7 +1285,7 @@ class ChatbotEngine:
         await whatsapp.send_text(phone, "Thank you. Your property details, photos, and ownership documents have been submitted successfully. We will verify the details within 24 hours and send you an update here.")
 
 
-    async def handle_list_documents(self, phone, input_value, message_type, media_id, _user, db, media_items=None):
+    async def handle_list_documents(self, phone, input_value, message_type, media_id, _user, db, media_items=None, **_kwargs):
         data = await self.get_data(phone)
         doc_urls = data.get("document_urls", [])
 
@@ -1282,6 +1300,9 @@ class ChatbotEngine:
                 return
             await self.set_state(phone, "LIST_LEGAL_REP")
             await whatsapp.send_text(phone, "Thank you. Please share the phone number of a legal representative we should keep on this listing.")
+            return
+
+        if not input_value and message_type != "document":
             return
 
         if message_type in ["image", "video"]:

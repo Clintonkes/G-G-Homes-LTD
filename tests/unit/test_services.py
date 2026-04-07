@@ -252,6 +252,34 @@ class TestChatbotMediaBatching:
         send_buttons.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_start_afresh_clears_recent_context_and_returns_main_menu(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine._remember_listing_outcome(phone, "pending_verification")
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        send_list = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="let's start afresh",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "MAIN_MENU"
+        assert await engine._get_recent_context(phone) == {}
+        send_text.assert_not_awaited()
+        assert send_list.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_idle_nice_job_gets_polite_close_not_welcome(self, db, monkeypatch):
         engine = ChatbotEngine(redis_client=FakeRedis())
         phone = "2348012345678"

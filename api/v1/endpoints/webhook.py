@@ -9,6 +9,7 @@ from core.config import settings
 from database.session import get_db, get_redis
 from services.chatbot_engine import ChatbotEngine
 from services.whatsapp_service import whatsapp
+from utils.helpers import format_phone_number
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -175,6 +176,9 @@ async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(
         logger.error("Webhook error: %s", exc, exc_info=True)
         if phone:
             try:
+                redis = await get_redis()
+                engine = ChatbotEngine(redis_client=redis)
+                await engine.reset_conversation(format_phone_number(phone), clear_recent_context=False)
                 await whatsapp.send_text(
                     phone,
                     "We ran into a small issue processing that message. "
