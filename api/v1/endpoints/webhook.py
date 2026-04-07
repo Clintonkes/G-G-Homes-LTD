@@ -141,18 +141,9 @@ async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(
                     button_id = interactive.get("list_reply", {}).get("id")
 
             elif msg_type in MEDIA_MESSAGE_TYPES:
-                # Build the full batch of related media messages
-                media_items, message_ids, _ = _build_media_batch(
-                    messages, index, consumed_indexes
-                )
-                # Pass ALL media items — engine handles all of them
+                media_items, message_ids, next_index = _build_media_batch(messages, index, consumed_indexes)
                 media_id = media_items[0]["id"] if media_items else None
-
-                # Advance index past ALL consumed messages in this batch
-                if consumed_indexes:
-                    index = max(consumed_indexes) + 1
-                else:
-                    index += 1
+                index = next_index
 
                 await engine.process_message(
                     phone=phone,
@@ -160,12 +151,12 @@ async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(
                     text=text,
                     button_id=button_id,
                     media_id=media_id,
-                    media_items=media_items,  # ← full batch
+                    media_items=media_items,
                     message_id=msg_id,
                     message_ids=message_ids,
                     db=db,
                 )
-                continue  # skip the index += 1 at the bottom
+                continue
 
             await engine.process_message(
                 phone=phone,

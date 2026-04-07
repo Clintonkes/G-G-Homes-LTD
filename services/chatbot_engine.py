@@ -1087,130 +1087,121 @@ class ChatbotEngine:
     async def handle_list_photos(
         self,
         phone: str,
-        input_val,
-        msg_type: str,
+        input_value,
+        message_type: str,
         media_id,
-        user,
-        db,
+        _user,
+        _db,
         media_items: list | None = None,
-        message_ids: list | None = None,
-        **kwargs,                           # absorb anything else
+        **_kwargs,
     ) -> None:
-        """Handle photo/video uploads from landlord during listing wizard."""
-
-        if input_val and input_val.upper() == "DONE":
-            await self.handle_list_submit(phone, user, db)
-            return
-
-        # Build the list of items to process
-        # If media_items batch was passed, use all of them
-        # If only a single media_id was passed, wrap it in a list
-        items_to_process: list[dict] = []
-
-        if media_items:
-            # Batch of multiple photos/videos sent at once
-            items_to_process = media_items
-        elif media_id and msg_type in ("image", "video"):
-            # Single media item
-            items_to_process = [{"type": msg_type, "id": media_id}]
-
-        if not items_to_process:
-            # No media and not DONE — prompt the user
-            data = await self.get_data(phone)
-            already_uploaded = len(data.get("photo_urls", [])) + len(data.get("video_urls", []))
-            if already_uploaded > 0:
-                await whatsapp.send_text(
-                    phone,
-                    f"✅ {already_uploaded} file(s) received so far.\n\n"
-                    "Send more photos/videos or type *DONE* to submit your listing."
-                )
-            else:
-                await whatsapp.send_text(
-                    phone,
-                    "📸 Please send photos or videos of your property.\n"
-                    "You can send multiple at once.\n"
-                    "Type *DONE* when finished."
-                )
-            return
-
         data = await self.get_data(phone)
-        photo_urls: list = data.get("photo_urls", [])
-        video_urls: list = data.get("video_urls", [])
-        failed = 0
-        newly_uploaded = 0
+        photo_urls = data.get("photo_urls", [])
+        video_urls = data.get("video_urls", [])
+        total_media = len(photo_urls) + len(video_urls)
 
-        for item in items_to_process:
-            item_type = item.get("type", msg_type)
-            item_id = item.get("id")
-            if not item_id:
+        if message_type == "text" and total_media >= 3:
+            await self.set_state(phone, "LIST_DOCUMENTS")
+            await whatsapp.send_text(phone, "Perfect! Your photos look great. Now please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
+            return
+
+        if self._is_done_message(input_value) or self._is_continue_signal(input_value):
+            if total_media < 3:
+                await whatsapp.send_text(phone, f"We need at least 3 clear photos or videos before we can continue. So far we have received {total_media}. Please send {3 - total_media} more.")
+                return
+            await self.set_state(phone, "LIST_DOCUMENTS")
+            await whatsapp.send_text(phone, "Perfect! Your photos look great. Now please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
+            return
+
+        if message_type not in ["image", "video"] or not media_id:
+            msg = "Please send a property image or video."
+            if total_media > 0:
+                msg += f" We have {total_media} media file(s). Send at least 3 to continue, or say 'done' if you have sent enough."
+            else:
+                msg += " We need at least 3 to get started."
+            await whatsapp.send_text(phone, msg)
+            return
+
+        incoming_media = media_items or [{"type": message_type, "id": media_id}]
+        existing_urls = set(photo_urls + video_urls)
+        accepted_count = 0
+        duplicate_count = 0
+        failed_count = 0
+
+        for item in incoming_media:
+            current_type = item.get("type")
+            current_id = item.get("id")
+            if current_type not in ["image", "video"] or not current_id:
+                failed_count += 1
                 continue
 
-            # Download from WhatsApp servers
-            media_url = await whatsapp.get_media_url(item_id)
+            media_url = await whatsapp.get_media_url(current_id)
             if not media_url:
-                failed += 1
+                failed_count += 1
                 continue
 
             media_bytes = await whatsapp.download_media(media_url)
             if not media_bytes:
-                failed += 1
+                failed_count += 1
                 continue
 
-            # Upload to Cloudinary
-            resource_type = "video" if item_type == "video" else "image"
-            cloudinary_url = await media_service.upload(
-                media_bytes,
-                resource_type=resource_type,
-                folder="properties",
-            )
-            if not cloudinary_url:
-                failed += 1
+            try:
+                uploaded = await media_service.upload(media_bytes, resource_type="video" if current_type == "video" else "image")
+            except Exception:
+                failed_count += 1
                 continue
 
-            # Add to the correct list
-            if item_type == "video":
-                video_urls.append(cloudinary_url)
-            else:
-                photo_urls.append(cloudinary_url)
+            if not uploaded:
+                failed_count += 1
+                continue
 
-            newly_uploaded += 1
+            if uploaded in existing_urls:
+                duplicate_count += 1
+                continue
 
-        # Save all newly uploaded URLs back to session
-        data["photo_urls"] = photo_urls
-        data["video_urls"] = video_urls
-        await self.set_data(phone, data)
+            existing_urls.add(uploaded)
+            accum_key = f"media_accum:{'video_urls' if current_type == 'video' else 'photo_urls'}:{phone}"
+            await self.redis.rpush(accum_key, uploaded)
+            accepted_count += 1
 
-        # Build a clear summary message
-        total = len(photo_urls) + len(video_urls)
-
-        if newly_uploaded == 0:
-            await whatsapp.send_text(
-                phone,
-                "❌ Could not process those files. Please try sending them again."
-            )
+        batch_token = await self._register_media_batch(phone, "LIST_PHOTOS")
+        if not await self._await_media_quiet_period(phone, "LIST_PHOTOS", batch_token):
             return
 
-        # Build confirmation message
-        parts = []
-        if newly_uploaded == 1:
-            parts.append("✅ 1 file received")
+        data = await self.get_data(phone)
+        for key in ["photo_urls", "video_urls"]:
+            accum_key = f"media_accum:{key}:{phone}"
+            accumulated = await self.redis.lrange(accum_key, 0, -1) or []
+            if accumulated:
+                existing = set(data.get(key, []))
+                data[key] = data.get(key, []) + [u for u in accumulated if u not in existing]
+                await self.redis.delete(accum_key)
+        await self.set_data(phone, data)
+
+        photo_urls = data.get("photo_urls", [])
+        video_urls = data.get("video_urls", [])
+        total_media = len(photo_urls) + len(video_urls)
+
+        if accepted_count == 0 and duplicate_count and not failed_count:
+            await whatsapp.send_text(phone, "It looks like those file(s) were already received. Please send different photos or videos, or say 'done' to continue.")
+            return
+        if accepted_count == 0 and failed_count:
+            await whatsapp.send_text(phone, "I could not save those media files. Please send them again. Once we have at least 3, you can say 'done' to continue.")
+            return
+
+        if total_media < 3:
+            response = f"Got it! We received {accepted_count} new media {self._pluralize(accepted_count, 'file')}. That is {total_media} so far. Send {3 - total_media} more, then say 'done' to continue."
+        elif total_media == 3:
+            response = f"That brings us to {total_media} media files. You can send more or say 'done' to continue."
         else:
-            parts.append(f"✅ {newly_uploaded} files received at once")
+            response = f"Received! We now have {total_media} media files. Say 'done' whenever you are ready to continue."
 
-        if failed > 0:
-            parts.append(f"⚠️ {failed} could not be processed")
-
-        summary_lines = [
-            "\n".join(parts),
-            "",
-            f"📸 Photos: {len(photo_urls)}",
-            f"🎬 Videos: {len(video_urls)}",
-            f"📦 Total: {total} file(s) uploaded",
-            "",
-            "Send more, or type *DONE* to submit your listing.",
-        ]
-
-        await whatsapp.send_text(phone, "\n".join(summary_lines))
+        if duplicate_count:
+            response += f" {duplicate_count} duplicate {self._pluralize(duplicate_count, 'file')} {'was' if duplicate_count == 1 else 'were'} skipped."
+        if failed_count:
+            resend_target = 'it' if failed_count == 1 else 'them'
+            response += f" {failed_count} {self._pluralize(failed_count, 'file')} could not be processed, so please resend {resend_target}."
+        await whatsapp.send_text(phone, response)
 
 
     async def handle_list_legal_rep(self, phone, input_value, *_args, **kwargs):

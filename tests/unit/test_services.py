@@ -122,6 +122,66 @@ class TestChatbotMediaBatching:
         assert "That brings us to 3 media files" in send_text.await_args.args[1]
 
     @pytest.mark.asyncio
+    async def test_three_photos_then_done_advances_once_to_documents(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine.set_state(phone, "LIST_PHOTOS")
+        await engine.set_data(phone, {"photo_urls": [], "video_urls": []})
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.get_media_url", AsyncMock(side_effect=["url-1", "url-2", "url-3"]))
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.download_media", AsyncMock(side_effect=[b"a", b"b", b"c"]))
+        monkeypatch.setattr("services.chatbot_engine.asyncio.sleep", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            "services.chatbot_engine.media_service.upload",
+            AsyncMock(side_effect=["https://cdn.example/1.jpg", "https://cdn.example/2.jpg", "https://cdn.example/3.jpg"]),
+        )
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="image",
+            text=None,
+            button_id=None,
+            media_id="media-1",
+            media_items=[
+                {"type": "image", "id": "media-1"},
+                {"type": "image", "id": "media-2"},
+                {"type": "image", "id": "media-3"},
+            ],
+            message_id="msg-1",
+            message_ids=["msg-1", "msg-2", "msg-3"],
+            db=db,
+        )
+
+        assert send_text.await_count == 1
+        assert "That brings us to 3 media files" in send_text.await_args.args[1]
+        assert "Please send a property image or video" not in send_text.await_args.args[1]
+
+        saved_data = await engine.get_data(phone)
+        assert len(saved_data["photo_urls"]) == 3
+        assert len(saved_data["video_urls"]) == 0
+        assert await engine.get_state(phone) == "LIST_PHOTOS"
+
+        send_text.reset_mock()
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="done",
+            button_id=None,
+            media_id=None,
+            message_id="msg-4",
+            db=db,
+        )
+
+        assert send_text.await_count == 1
+        assert "upload the ownership documents" in send_text.await_args.args[1].lower()
+        assert await engine.get_state(phone) == "LIST_DOCUMENTS"
+
+    @pytest.mark.asyncio
     async def test_media_batch_token_only_latest_request_should_reply(self, monkeypatch):
         engine = ChatbotEngine(redis_client=FakeRedis())
         phone = "2348012345678"
