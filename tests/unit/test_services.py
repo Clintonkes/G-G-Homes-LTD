@@ -4,6 +4,7 @@ from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 
 from core.security import create_access_token, decode_access_token, hash_password, verify_password
 from database.models import User, UserRole
@@ -92,6 +93,103 @@ class FakeRedis:
 
 
 class TestChatbotMediaBatching:
+    @pytest.mark.asyncio
+    async def test_account_edit_name_updates_user_profile(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "MAIN_MENU")
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        send_list = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="interactive",
+            text=None,
+            button_id="my_account",
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+        await engine.process_message(
+            phone=phone,
+            message_type="interactive",
+            text=None,
+            button_id="account_edit_name",
+            media_id=None,
+            message_id="msg-2",
+            db=db,
+        )
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="Ada Lovelace",
+            button_id=None,
+            media_id=None,
+            message_id="msg-3",
+            db=db,
+        )
+
+        result = await db.execute(select(User).where(User.phone_number == phone))
+        user = result.scalar_one()
+        assert user.full_name == "Ada Lovelace"
+        assert await engine.get_state(phone) == "ACCOUNT_MENU"
+        assert any("profile updated successfully" in call.args[1].lower() for call in send_text.await_args_list if len(call.args) > 1)
+
+    @pytest.mark.asyncio
+    async def test_main_menu_search_button_starts_search_flow(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "MAIN_MENU")
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="interactive",
+            text=None,
+            button_id="search_property",
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "SEARCH_LOCATION"
+        assert send_text.await_count == 1
+        assert "which neighbourhood" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_main_menu_account_button_opens_account_menu(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "MAIN_MENU")
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        send_list = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="interactive",
+            text=None,
+            button_id="my_account",
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "ACCOUNT_MENU"
+        assert send_text.await_count == 1
+        assert "account dashboard" in send_text.await_args.args[1].lower()
+        assert send_list.await_count == 1
+
     @pytest.mark.asyncio
     async def test_resume_prompt_accepts_natural_continue_phrase(self, db, monkeypatch):
         engine = ChatbotEngine(redis_client=FakeRedis())

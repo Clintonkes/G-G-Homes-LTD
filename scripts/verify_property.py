@@ -2,7 +2,14 @@
 
 import argparse
 import asyncio
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Allow direct execution: `python scripts/verify_property.py ...`
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -13,6 +20,18 @@ from services.whatsapp_service import whatsapp
 
 
 # ---------- Query helpers ----------
+def _preferred_contact_name(prop: Property) -> str:
+    placeholders = {"", "whatsapp user", "valued client", "guest", "partner", "unknown"}
+    candidates = [
+        (prop.landlord_full_name or "").strip(),
+        (prop.landlord.full_name if prop.landlord and prop.landlord.full_name else "").strip(),
+    ]
+    for candidate in candidates:
+        if candidate.lower() not in placeholders:
+            return candidate
+    return "Partner"
+
+
 def _base_property_query():
     return select(Property).options(selectinload(Property.landlord)).order_by(Property.created_at.desc())
 
@@ -88,11 +107,20 @@ async def approve_property(property_id: int, notify: bool) -> None:
         await db.refresh(prop)
 
         if notify and prop.landlord and prop.landlord.phone_number:
-            name = (prop.landlord.full_name or "Partner").strip() or "Partner"
-            await whatsapp.send_text(
+            name = _preferred_contact_name(prop)
+            sent = await whatsapp.send_text(
                 prop.landlord.phone_number,
                 f"Congratulations {name}. Your property '{prop.title}' has been verified and is now live on G & G Homes Ltd.",
             )
+            if sent:
+                print(f"WhatsApp notification sent to {prop.landlord.phone_number}.")
+            else:
+                print(
+                    "WARNING: Property was approved but WhatsApp notification failed. "
+                    "Check WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID and network."
+                )
+        elif notify:
+            print("WARNING: Property approved, but landlord phone number is missing so notification was skipped.")
         print(f"Property {property_id} approved and moved to active.")
 
 
@@ -126,6 +154,16 @@ def _parse_args() -> argparse.Namespace:
         description="Review property submissions and approve or reject them for public listing."
     )
     subparsers = parser.add_subparsers(dest="command")
+    parser.add_argument(
+        "--property-id",
+        type=int,
+        help="Backward-compatible shortcut: approve this property and notify landlord.",
+    )
+    parser.add_argument(
+        "--no-notify",
+        action="store_true",
+        help="When used with --property-id shortcut, skip WhatsApp notification.",
+    )
 
     list_parser = subparsers.add_parser("list", help="List properties")
     list_parser.add_argument(
@@ -153,6 +191,12 @@ def _parse_args() -> argparse.Namespace:
 
 async def main() -> None:
     args = _parse_args()
+
+    # Backward compatibility: python scripts/verify_property.py --property-id 12
+    # approves and notifies by default, matching previous operator workflow.
+    if args.property_id and args.command is None:
+        await approve_property(property_id=args.property_id, notify=not args.no_notify)
+        return
 
     if args.command in {None, "list"}:
         status = PropertyStatus(args.status)

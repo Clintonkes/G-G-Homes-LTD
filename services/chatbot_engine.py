@@ -7,11 +7,11 @@ import json
 from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from database.models import Appointment, AppointmentStatus, Property, PropertyStatus, PropertyType, User, UserRole
+from database.models import Appointment, AppointmentStatus, Payment, Property, PropertyStatus, PropertyType, Subscription, User, UserRole
 from services.intent_service import intent_service
 from services.media_service import media_service
 from services.property_service import property_service
@@ -26,8 +26,12 @@ RECENT_CONTEXT_KEY_PREFIX = "recent_context:"
 RESUME_PROMPT_STATE = "RESUME_PROMPT"
 LIST_BEDROOMS_CUSTOM_STATE = "LIST_BEDROOMS_CUSTOM"
 CUSTOMER_SERVICE_STATE = "CUSTOMER_SERVICE"
+ACCOUNT_MENU_STATE = "ACCOUNT_MENU"
+ACCOUNT_EDIT_NAME_STATE = "ACCOUNT_EDIT_NAME"
+ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE"}
+ACCOUNT_FLOW_STATES = {ACCOUNT_MENU_STATE, ACCOUNT_EDIT_NAME_STATE, ACCOUNT_EDIT_EMAIL_STATE}
 
 
 class ChatbotEngine:
@@ -55,6 +59,33 @@ class ChatbotEngine:
         if not name or name.lower() in {"guest", "whatsapp user", "valued client"}:
             return None
         return name
+
+    def _is_placeholder_name(self, name: str | None) -> bool:
+        if not name:
+            return True
+        normalized = name.strip().lower()
+        return normalized in {"whatsapp user", "valued client", "guest", "partner", "unknown"}
+
+    def _resolve_service_selection(self, input_value: str | None) -> str | None:
+        normalized = self._normalize_text(input_value)
+        if not normalized:
+            return None
+        mapping = {
+            "search_property": "search_property",
+            "list_property": "list_property",
+            "my_account": "my_account",
+            "customer_service": "customer_service",
+            "account_profile": "account_profile",
+            "account_edit_profile": "account_edit_profile",
+            "account_edit_name": "account_edit_name",
+            "account_edit_email": "account_edit_email",
+            "account_listings": "account_listings",
+            "account_appointments": "account_appointments",
+            "account_payments": "account_payments",
+            "account_subscriptions": "account_subscriptions",
+            "account_back_home": "account_back_home",
+        }
+        return mapping.get(normalized)
 
     def _is_done_message(self, input_value: str | None) -> bool:
         normalized = self._normalize_text(input_value)
@@ -345,6 +376,45 @@ class ChatbotEngine:
             "Customer service is ready to help. Please tell us the issue you want us to help with, such as listing update, booking help, account issue, or finding a property. You can also say continue to resume your previous flow.",
         )
 
+    async def _open_account_service(self, phone: str, user: User, db: AsyncSession) -> None:
+        await self.set_state(phone, ACCOUNT_MENU_STATE)
+        landlord_listings_result = await db.execute(select(Property).where(Property.landlord_id == user.id))
+        landlord_listings = landlord_listings_result.scalars().all()
+        active_count = sum(1 for prop in landlord_listings if prop.status == PropertyStatus.active)
+        pending_count = sum(1 for prop in landlord_listings if prop.status == PropertyStatus.pending_verification)
+        appointments_result = await db.execute(
+            select(Appointment).where(or_(Appointment.tenant_id == user.id, Appointment.landlord_id == user.id))
+        )
+        appointments_count = len(appointments_result.scalars().all())
+
+        display_name = self._display_name(user) or "there"
+        await whatsapp.send_text(
+            phone,
+            (
+                f"Account dashboard for {display_name}.\n"
+                f"Listings: {len(landlord_listings)} total ({active_count} active, {pending_count} pending verification)\n"
+                f"Appointments: {appointments_count}\n"
+                "Choose what you want to view below."
+            ),
+        )
+        await whatsapp.send_list(
+            phone,
+            "Select an account section.",
+            "Open Section",
+            [{
+                "title": "My Account",
+                "rows": [
+                    {"id": "account_profile", "title": "Profile Details"},
+                    {"id": "account_edit_profile", "title": "Edit Profile"},
+                    {"id": "account_listings", "title": "My Listings"},
+                    {"id": "account_appointments", "title": "My Appointments"},
+                    {"id": "account_payments", "title": "Payment History"},
+                    {"id": "account_subscriptions", "title": "Subscription Status"},
+                    {"id": "account_back_home", "title": "Back To Main Menu"},
+                ],
+            }],
+        )
+
 
     async def _handle_unexpected_media(self, phone: str, state: str, data: dict, media_types: set[str]) -> None:
         if state == "LIST_PHOTOS" and "document" in media_types:
@@ -620,6 +690,12 @@ class ChatbotEngine:
             await whatsapp.send_text(phone, "Please share your phone number so we can reach you if needed.")
         elif state == "SCHEDULE_DATE":
             await whatsapp.send_text(phone, "Please share your preferred inspection date and time. Example: 15/07/2026 10:00")
+        elif state == ACCOUNT_MENU_STATE:
+            await self._open_account_service(phone, await self._get_or_create_user(phone, db), db)
+        elif state == ACCOUNT_EDIT_NAME_STATE:
+            await whatsapp.send_text(phone, "Please send your full name in this format: Firstname Lastname.")
+        elif state == ACCOUNT_EDIT_EMAIL_STATE:
+            await whatsapp.send_text(phone, "Please send your email address, for example name@example.com.")
         else:
             await self.send_main_menu(phone, user=await self._get_or_create_user(phone, db))
 
@@ -675,6 +751,7 @@ class ChatbotEngine:
         data = await self.get_data(phone)
         input_value = button_id or (text.strip() if text else None)
         normalized = self._normalize_text(input_value)
+        direct_selection = self._resolve_service_selection(input_value)
         recent_context = await self._get_recent_context(phone)
 
         # Global safety controls that should interrupt any flow immediately.
@@ -713,8 +790,10 @@ class ChatbotEngine:
         if await self._handle_idle_courtesy_message(phone, input_value, active_state):
             return
 
-        intent_decision = await intent_service.detect_intent(input_value if not button_id else button_id, state)
-        intent = intent_decision.intent
+        intent = direct_selection
+        if not intent:
+            intent_decision = await intent_service.detect_intent(input_value if not button_id else button_id, state)
+            intent = intent_decision.intent
 
         if self._is_greeting(input_value) and not active_state and state != "MAIN_MENU":
             await self._offer_resume_or_restart(phone, user, state, data)
@@ -736,9 +815,8 @@ class ChatbotEngine:
             await self._start_property_listing(phone, user)
             return
 
-        if intent == "my_account" and state == "MAIN_MENU":
-            await whatsapp.send_text(phone, "We can help with account and booking support. Please tell us what you would like to check, or choose an option below to continue.")
-            await self.send_main_menu(phone, user)
+        if intent == "my_account" and state not in SEARCH_FLOW_STATES and state not in LISTING_FLOW_STATES:
+            await self._open_account_service(phone, user, db)
             return
 
         # State-specific handlers keep each workflow step isolated and testable.
@@ -754,6 +832,9 @@ class ChatbotEngine:
             "SCHEDULE_CONFIRM": self.handle_schedule_confirm,
             "AWAIT_PAYMENT": self.handle_await_payment,
             CUSTOMER_SERVICE_STATE: self.handle_customer_service,
+            ACCOUNT_MENU_STATE: self.handle_account_menu,
+            ACCOUNT_EDIT_NAME_STATE: self.handle_account_edit_name,
+            ACCOUNT_EDIT_EMAIL_STATE: self.handle_account_edit_email,
             "LIST_TITLE": self.handle_list_title,
             "LIST_ADDRESS": self.handle_list_address,
             "LIST_NEIGHBOURHOOD": self.handle_list_neighbourhood,
@@ -828,7 +909,8 @@ class ChatbotEngine:
         )
 
     async def handle_main_menu(self, phone, input_value, _message_type, _media_id, user, _db, **kwargs):
-        intent = (await intent_service.detect_intent(input_value, "MAIN_MENU")).intent
+        direct_selection = self._resolve_service_selection(input_value)
+        intent = direct_selection or (await intent_service.detect_intent(input_value, "MAIN_MENU")).intent
         if intent == "search_property":
             await self._start_property_search(phone)
             return
@@ -836,8 +918,7 @@ class ChatbotEngine:
             await self._start_property_listing(phone, user)
             return
         if intent == "my_account":
-            await whatsapp.send_text(phone, "We can help with account and booking support. Please tell us what you would like to check, or choose an option below to continue.")
-            await self.send_main_menu(phone, user)
+            await self._open_account_service(phone, user, kwargs.get("db") or _db)
             return
         if intent == "customer_service":
             await whatsapp.send_text(phone, "Customer service is here to help. Tell us whether you need listing support, booking help, account help, or help finding a property.")
@@ -866,7 +947,7 @@ class ChatbotEngine:
             await self._start_property_listing(phone, user)
             return
         if intent == "my_account":
-            await whatsapp.send_text(phone, "We can help with account and booking support. Please tell us what you would like to check.")
+            await self._open_account_service(phone, user, db)
             return
         if self._is_status_check_message(input_value):
             recent_context = await self._get_recent_context(phone)
@@ -876,6 +957,171 @@ class ChatbotEngine:
             await whatsapp.send_text(phone, "You are welcome. If you need anything else, just say menu and we will continue from there.")
             return
         await whatsapp.send_text(phone, "Customer service can help with listing updates, booking questions, account support, and finding a property. Please tell us which one you need, or say continue to resume your previous conversation.")
+
+    async def handle_account_menu(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
+        selection = self._resolve_service_selection(input_value)
+        if selection == "account_back_home":
+            await self.send_main_menu(phone, user)
+            return
+        if selection == "account_profile":
+            await whatsapp.send_text(
+                phone,
+                (
+                    "Profile details:\n"
+                    f"Name: {(user.full_name or 'Not set').strip()}\n"
+                    f"Phone: {user.phone_number}\n"
+                    f"Email: {user.email or 'Not set'}\n"
+                    f"Role: {user.role.value.replace('_', ' ').title()}\n"
+                    f"ID Verified: {'Yes' if user.id_verified else 'No'}\n"
+                    f"Onboarding Complete: {'Yes' if user.onboarding_complete else 'No'}"
+                ),
+            )
+            await self._open_account_service(phone, user, db)
+            return
+        if selection == "account_edit_profile":
+            await whatsapp.send_list(
+                phone,
+                "What would you like to update in your profile?",
+                "Edit Field",
+                [{
+                    "title": "Profile Update",
+                    "rows": [
+                        {"id": "account_edit_name", "title": "Edit Full Name"},
+                        {"id": "account_edit_email", "title": "Edit Email"},
+                        {"id": "account_back_home", "title": "Back To Main Menu"},
+                    ],
+                }],
+            )
+            return
+        if selection == "account_edit_name":
+            await self.set_state(phone, ACCOUNT_EDIT_NAME_STATE)
+            await whatsapp.send_text(phone, "Please send your full name in this format: Firstname Lastname.")
+            return
+        if selection == "account_edit_email":
+            await self.set_state(phone, ACCOUNT_EDIT_EMAIL_STATE)
+            await whatsapp.send_text(phone, "Please send your email address, for example name@example.com.")
+            return
+        if selection == "account_listings":
+            result = await db.execute(
+                select(Property).where(Property.landlord_id == user.id).order_by(Property.created_at.desc())
+            )
+            listings = result.scalars().all()
+            if not listings:
+                await whatsapp.send_text(phone, "You do not have any submitted listings yet.")
+            else:
+                preview = listings[:8]
+                lines = [
+                    f"{idx}. {prop.title} | {self._describe_listing_status(prop.status.value if hasattr(prop.status, 'value') else str(prop.status))}"
+                    for idx, prop in enumerate(preview, start=1)
+                ]
+                await whatsapp.send_text(
+                    phone,
+                    "Your listings:\n" + "\n".join(lines),
+                )
+            await self._open_account_service(phone, user, db)
+            return
+        if selection == "account_payments":
+            result = await db.execute(
+                select(Payment).where(Payment.payer_id == user.id).order_by(Payment.created_at.desc())
+            )
+            payments = result.scalars().all()
+            if not payments:
+                await whatsapp.send_text(phone, "No payment history found on your account yet.")
+            else:
+                preview = payments[:8]
+                lines = [
+                    (
+                        f"{idx}. {pay.payment_type.value.replace('_', ' ').title()} | "
+                        f"{format_naira(pay.gross_amount)} | {pay.status.value.replace('_', ' ').title()}"
+                    )
+                    for idx, pay in enumerate(preview, start=1)
+                ]
+                await whatsapp.send_text(phone, "Payment history:\n" + "\n".join(lines))
+            await self._open_account_service(phone, user, db)
+            return
+        if selection == "account_subscriptions":
+            result = await db.execute(
+                select(Subscription).where(Subscription.user_id == user.id).order_by(Subscription.start_date.desc())
+            )
+            subscriptions = result.scalars().all()
+            if not subscriptions:
+                await whatsapp.send_text(phone, "No active subscription record found on your account yet.")
+            else:
+                latest = subscriptions[0]
+                await whatsapp.send_text(
+                    phone,
+                    (
+                        "Subscription status:\n"
+                        f"Plan: {latest.plan.value.title()}\n"
+                        f"Status: {latest.status.value.title()}\n"
+                        f"Amount: {format_naira(latest.amount)}\n"
+                        f"Start: {latest.start_date:%d/%m/%Y}\n"
+                        f"End: {latest.end_date:%d/%m/%Y}" if latest.end_date else
+                        (
+                            "Subscription status:\n"
+                            f"Plan: {latest.plan.value.title()}\n"
+                            f"Status: {latest.status.value.title()}\n"
+                            f"Amount: {format_naira(latest.amount)}\n"
+                            f"Start: {latest.start_date:%d/%m/%Y}\n"
+                            "End: Not set"
+                        )
+                    ),
+                )
+            await self._open_account_service(phone, user, db)
+            return
+        if selection == "account_appointments":
+            result = await db.execute(
+                select(Appointment)
+                .where(or_(Appointment.tenant_id == user.id, Appointment.landlord_id == user.id))
+                .order_by(Appointment.scheduled_date.desc())
+            )
+            appointments = result.scalars().all()
+            if not appointments:
+                await whatsapp.send_text(phone, "You do not have any appointments yet.")
+            else:
+                preview = appointments[:8]
+                lines = [
+                    f"{idx}. {appt.scheduled_date:%d/%m/%Y %H:%M} | {appt.status.value.replace('_', ' ')}"
+                    for idx, appt in enumerate(preview, start=1)
+                ]
+                await whatsapp.send_text(phone, "Your appointments:\n" + "\n".join(lines))
+            await self._open_account_service(phone, user, db)
+            return
+
+        intent = (await intent_service.detect_intent(input_value, ACCOUNT_MENU_STATE)).intent
+        if intent == "search_property":
+            await self._start_property_search(phone)
+            return
+        if intent == "list_property":
+            await self._start_property_listing(phone, user)
+            return
+        if intent == "customer_service":
+            await self._open_customer_service(phone, ACCOUNT_MENU_STATE, await self.get_data(phone), db)
+            return
+        await whatsapp.send_text(phone, "Please choose one of the account options so we can show the exact section you need.")
+        await self._open_account_service(phone, user, db)
+
+    async def handle_account_edit_name(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
+        full_name = (input_value or "").strip()
+        if len(full_name.split()) < 2:
+            await whatsapp.send_text(phone, "Please send your full name, for example Firstname Lastname.")
+            return
+        user.full_name = full_name
+        await db.commit()
+        await db.refresh(user)
+        await whatsapp.send_text(phone, f"Profile updated successfully. Your name is now {full_name}.")
+        await self._open_account_service(phone, user, db)
+
+    async def handle_account_edit_email(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
+        email = (input_value or "").strip().lower()
+        if "@" not in email or "." not in email.split("@")[-1]:
+            await whatsapp.send_text(phone, "Please send a valid email address, for example name@example.com.")
+            return
+        user.email = email
+        await db.commit()
+        await db.refresh(user)
+        await whatsapp.send_text(phone, f"Email updated successfully to {email}.")
+        await self._open_account_service(phone, user, db)
 
 
     async def handle_search_location(self, phone, input_value, *_args, **kwargs):
