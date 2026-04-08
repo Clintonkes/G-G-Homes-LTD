@@ -17,6 +17,8 @@ MEDIA_MESSAGE_TYPES = {"image", "video", "document"}
 MEDIA_CONTAINER_KEYS = ("media_group_id", "container_id", "parent_id", "id", "message_id")
 
 
+# Batch media by high-level kind so mixed image/video bundles and document bundles
+# are handled in the correct listing stage with stable ordering.
 def _media_kind(message_type: str) -> str | None:
     if message_type in {"image", "video"}:
         return "visual"
@@ -102,6 +104,8 @@ async def verify_whatsapp_webhook(
 
 @router.post("/whatsapp")
 async def receive_whatsapp_message(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
+    # This endpoint always returns 200 to prevent WhatsApp retry storms.
+    # Any parsing or processing issue is handled internally with safe fallbacks.
     phone = ""
     try:
         body = await request.json()

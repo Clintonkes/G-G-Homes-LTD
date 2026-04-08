@@ -99,7 +99,27 @@ class ChatbotEngine:
             "go ahead", "move on", "go on", "yeah", "yep", "yup", "alright",
             "fine", "go", "forward", "ahead",
         }
-        return cleaned in signals
+        if cleaned in signals:
+            return True
+
+        phrase_signals = [
+            "lets continue",
+            "let's continue",
+            "let us continue",
+            "continue our previous conversation",
+            "continue previous conversation",
+            "continue where we stopped",
+            "continue where we left off",
+            "resume previous conversation",
+            "resume our previous conversation",
+            "resume where we stopped",
+            "resume where we left off",
+        ]
+        if any(phrase in cleaned for phrase in phrase_signals):
+            return True
+        if cleaned.startswith("continue ") or cleaned.startswith("resume "):
+            return True
+        return False
 
     def _is_greeting(self, input_value: str | None) -> bool:
         normalized = self._normalize_text(input_value)
@@ -325,6 +345,7 @@ class ChatbotEngine:
             "Customer service is ready to help. Please tell us the issue you want us to help with, such as listing update, booking help, account issue, or finding a property. You can also say continue to resume your previous flow.",
         )
 
+
     async def _handle_unexpected_media(self, phone: str, state: str, data: dict, media_types: set[str]) -> None:
         if state == "LIST_PHOTOS" and "document" in media_types:
             total_media = len(data.get("photo_urls", [])) + len(data.get("video_urls", []))
@@ -340,11 +361,14 @@ class ChatbotEngine:
         instruction = self._state_instruction_text(state, data)
         await whatsapp.send_text(phone, f"I noticed you sent {descriptor}, but we are not collecting files at this stage. {instruction}")
 
+
     async def _write_active_state(self, phone: str, state: str) -> None:
         await self.redis.set(self._state_key(phone), state, ex=settings.REDIS_STATE_TTL_SECONDS)
 
+
     async def _write_active_data(self, phone: str, data: dict) -> None:
         await self.redis.set(self._data_key(phone), json.dumps(data), ex=settings.REDIS_STATE_TTL_SECONDS)
+
 
     async def _save_resume_snapshot(self, phone: str, state: str, data: dict) -> None:
         payload = {
@@ -355,6 +379,7 @@ class ChatbotEngine:
         }
         token = self.cipher.encrypt(json.dumps(payload).encode("utf-8")).decode("utf-8")
         await self.redis.set(self._resume_key(phone), token, ex=settings.REDIS_RESUME_TTL_SECONDS)
+
 
     async def _load_resume_snapshot(self, phone: str) -> tuple[str | None, dict]:
         token = await self.redis.get(self._resume_key(phone))
@@ -652,6 +677,7 @@ class ChatbotEngine:
         normalized = self._normalize_text(input_value)
         recent_context = await self._get_recent_context(phone)
 
+        # Global safety controls that should interrupt any flow immediately.
         if normalized in ["menu", "home", "start"]:
             await self.reset_conversation(phone, clear_recent_context=True)
             await self.send_main_menu(phone, user)
@@ -667,6 +693,7 @@ class ChatbotEngine:
             await self.send_main_menu(phone, user)
             return
 
+        # Guardrails for media sent in the wrong stage.
         media_items = media_items or ([{"type": message_type, "id": media_id}] if message_type in ["image", "video", "document"] and media_id else None)
         incoming_media_types = {item.get("type") for item in (media_items or []) if item.get("type")}
         if incoming_media_types:
@@ -714,6 +741,7 @@ class ChatbotEngine:
             await self.send_main_menu(phone, user)
             return
 
+        # State-specific handlers keep each workflow step isolated and testable.
         handler_map = {
             "MAIN_MENU": self.handle_main_menu,
             "SEARCH_LOCATION": self.handle_search_location,
@@ -1115,11 +1143,7 @@ class ChatbotEngine:
         video_urls = data.get("video_urls", [])
         total_media = len(photo_urls) + len(video_urls)
 
-        if message_type == "text" and total_media >= 3:
-            await self.set_state(phone, "LIST_DOCUMENTS")
-            await whatsapp.send_text(phone, "Perfect! Your photos look great. Now please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
-            return
-
+        # Progress to the next step only when user explicitly confirms completion.
         if self._is_done_message(input_value) or self._is_continue_signal(input_value):
             if total_media < 3:
                 await whatsapp.send_text(phone, f"We need at least 3 clear photos or videos before we can continue. So far we have received {total_media}. Please send {3 - total_media} more.")
@@ -1128,16 +1152,27 @@ class ChatbotEngine:
             await whatsapp.send_text(phone, "Perfect! Your photos look great. Now please upload the ownership documents for this property. Your data is secure and will not be shared with any third party. When you have uploaded the document files, reply with done.")
             return
 
-        if not input_value and message_type not in ["image", "video"]:
+        if message_type == "document":
+            await whatsapp.send_text(phone, "We are still collecting property photos and videos at this stage. Please send at least 3 clear photos or videos before we move to ownership documents.")
             return
 
-        if message_type not in ["image", "video"] or not media_id:
+        if message_type == "text":
             msg = "Please send a property image or video."
             if total_media > 0:
                 msg += f" We have {total_media} media file(s). Send at least 3 to continue, or say 'done' if you have sent enough."
             else:
                 msg += " We need at least 3 to get started."
             await whatsapp.send_text(phone, msg)
+            return
+
+        if not input_value and message_type not in ["image", "video"]:
+            return
+
+        if message_type not in ["image", "video"]:
+            return
+
+        if not media_id:
+            await whatsapp.send_text(phone, "We could not process that file. Please resend the property image or video.")
             return
 
         incoming_media = media_items or [{"type": message_type, "id": media_id}]

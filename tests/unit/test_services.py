@@ -75,8 +75,104 @@ class FakeRedis:
         for key in keys:
             self.store.pop(key, None)
 
+    async def rpush(self, key, value):
+        values = self.store.get(key, [])
+        if not isinstance(values, list):
+            values = [values]
+        values.append(value)
+        self.store[key] = values
+
+    async def lrange(self, key, start, end):
+        values = self.store.get(key, [])
+        if not isinstance(values, list):
+            return []
+        if end == -1:
+            return values[start:]
+        return values[start : end + 1]
+
 
 class TestChatbotMediaBatching:
+    @pytest.mark.asyncio
+    async def test_resume_prompt_accepts_natural_continue_phrase(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine.set_state(phone, "RESUME_PROMPT")
+        await engine.set_data(
+            phone,
+            {
+                "resume_target_state": "LIST_ADDRESS",
+                "resume_target_data": {"title": "2 Bedroom Flat"},
+            },
+        )
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="lets continue our previous conversation",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "LIST_ADDRESS"
+        assert send_text.await_count == 2
+        assert "continuing from where we stopped" in send_text.await_args_list[0].args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_list_photos_prompt_only_for_text_or_document(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine.set_state(phone, "LIST_PHOTOS")
+        await engine.set_data(phone, {"photo_urls": ["https://cdn.example/1.jpg"], "video_urls": []})
+
+        intent_decision = type("IntentDecision", (), {"intent": "unknown"})()
+        monkeypatch.setattr("services.chatbot_engine.intent_service.detect_intent", AsyncMock(return_value=intent_decision))
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="sticker",
+            text=None,
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+        send_text.assert_not_awaited()
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="hello there",
+            button_id=None,
+            media_id=None,
+            message_id="msg-2",
+            db=db,
+        )
+        assert send_text.await_count == 1
+        assert "please send a property image or video" in send_text.await_args.args[1].lower()
+
+        await engine.process_message(
+            phone=phone,
+            message_type="document",
+            text=None,
+            button_id=None,
+            media_id="doc-1",
+            message_id="msg-3",
+            db=db,
+        )
+        assert send_text.await_count == 2
+        assert "still collecting property photos and videos" in send_text.await_args.args[1].lower()
+
     @pytest.mark.asyncio
     async def test_handle_list_photos_counts_batched_media_before_reply(self, db, monkeypatch):
         engine = ChatbotEngine(redis_client=FakeRedis())
