@@ -37,17 +37,18 @@ class Settings(BaseSettings):
     ADMIN_EMAIL: str = "admin@rentease.ng"
     ADMIN_PASSWORD: str = "ChangeThisStrongPassword123!"
 
-    LLM_INTENT_ENABLED: bool = False
+    LLM_INTENT_ENABLED: bool = True
     LLM_INTENT_API_URL: str = "https://api.openai.com/v1/responses"
     LLM_INTENT_API_KEY: str = ""
-    LLM_INTENT_MODEL: str = "gpt-4o-mini"
+    LLM_INTENT_MODEL: str ="gpt-4o-mini"
+    LLM_INTENT_API_KEY: str = ""
     LLM_INTENT_TIMEOUT_SECONDS: int = 15
     LLM_INTENT_MIN_CONFIDENCE: float = 0.6
     LLM_INTENT_TEMPERATURE: float = 0.0
     LLM_INTENT_MAX_TOKENS: int = 80
     LLM_INTENT_ALWAYS_USE: bool = True
 
-    LLM_CHAT_ENABLED: bool = False
+    LLM_CHAT_ENABLED: bool = True
     LLM_CHAT_API_URL: str = "https://api.openai.com/v1/responses"
     LLM_CHAT_API_KEY: str = ""
     LLM_CHAT_MODEL: str = "gpt-4o-mini"

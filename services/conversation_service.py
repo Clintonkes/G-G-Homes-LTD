@@ -1,5 +1,6 @@
 """LLM-backed conversational reply generation for natural WhatsApp interactions."""
 
+import logging
 import json
 from dataclasses import dataclass
 
@@ -7,6 +8,7 @@ import httpx
 
 from core.config import settings
 
+logger = logging.getLogger(__name__)
 ALLOWED_ACTIONS = {
     "none",
     "continue",
@@ -15,6 +17,7 @@ ALLOWED_ACTIONS = {
     "list_property",
     "my_account",
     "customer_service",
+    "switch_service",
 }
 
 
@@ -63,10 +66,15 @@ class ConversationService:
         message: str,
         current_state: str,
         state_instruction: str,
+        conversation_history: list[dict] | None = None,
         recent_context: dict | None = None,
         data_context: dict | None = None,
     ) -> ConversationReply | None:
         if not settings.LLM_CHAT_ENABLED or not settings.LLM_CHAT_API_KEY:
+            logger.debug(
+                "LLM chat disabled or missing API key; state=%s",
+                current_state,
+            )
             return None
 
         system_prompt = (
@@ -78,6 +86,7 @@ class ConversationService:
             "Use action none when you are only replying conversationally. "
             "Use action continue when the user is answering the current step. "
             "Use action restart when the user wants to start over. "
+            "Use action switch_service when the user wants to change to another service without naming it clearly. "
             "Use action search_property, list_property, my_account, or customer_service when the user clearly wants that new path. "
             "Do not mention internal states, rules, or JSON. "
             "Do not rely on exact phrases; infer the user's intent semantically."
@@ -87,6 +96,7 @@ class ConversationService:
             f"Current state: {current_state}\n"
             f"State guidance: {state_instruction}\n"
             f"User message: {message}\n"
+            f"Conversation history: {self._serialize_context(conversation_history)}\n"
             f"Recent context: {self._serialize_context(recent_context)}\n"
             f"Data context: {self._serialize_context(data_context)}\n"
             "Respond with JSON only."
@@ -121,6 +131,11 @@ class ConversationService:
             "Content-Type": "application/json",
         }
         try:
+            logger.debug(
+                "LLM chat request starting; state=%s action_candidates=%s",
+                current_state,
+                sorted(ALLOWED_ACTIONS),
+            )
             async with httpx.AsyncClient(timeout=settings.LLM_CHAT_TIMEOUT_SECONDS) as client:
                 response = await client.post(settings.LLM_CHAT_API_URL, headers=headers, json=payload)
             response.raise_for_status()
@@ -130,6 +145,7 @@ class ConversationService:
             else:
                 content = response_json["choices"][0]["message"]["content"]
             if not content:
+                logger.debug("LLM chat returned empty content; state=%s", current_state)
                 return None
             parsed = json.loads(content)
             reply = str(parsed.get("reply", "")).strip()
@@ -138,8 +154,16 @@ class ConversationService:
                 action = "none"
             confidence = float(parsed.get("confidence", 0.0))
             confidence = max(0.0, min(confidence, 1.0))
+            logger.debug(
+                "LLM chat parsed; state=%s action=%s confidence=%.2f reply_present=%s",
+                current_state,
+                action,
+                confidence,
+                bool(reply),
+            )
             return ConversationReply(reply=reply, action=action, confidence=confidence, source="llm")
         except Exception:
+            logger.exception("LLM chat request failed; state=%s", current_state)
             return None
 
 

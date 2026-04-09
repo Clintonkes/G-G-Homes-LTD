@@ -12,6 +12,7 @@ ALLOWED_INTENTS = {
     "list_property",
     "my_account",
     "customer_service",
+    "switch_service",
     "continue",
     "restart",
     "decline",
@@ -125,10 +126,11 @@ class IntentService:
         system_prompt = (
             "You classify WhatsApp real-estate assistant messages into a small set of intents. "
             "Return strict JSON with keys: intent, confidence. "
-            "Allowed intents: search_property, list_property, my_account, customer_service, continue, restart, decline, greeting, gratitude, status_check, clarification, goodbye, unknown. "
+            "Allowed intents: search_property, list_property, my_account, customer_service, switch_service, continue, restart, decline, greeting, gratitude, status_check, clarification, goodbye, unknown. "
             "Use the current workflow state and the user's meaning, not exact wording. "
             "Return continue when the user is answering the current step, confirming, proceeding, or indicating they are finished with the current step. "
             "Return restart when the user wants to reset the whole conversation. "
+            "Return switch_service when the user wants to switch to a different service but has not specified which one. "
             "Return search_property when the user wants to begin, restart, or change a property search. "
             "Return list_property when the user wants to list or submit a property. "
             "Return my_account when the user wants account or profile help. "

@@ -308,7 +308,7 @@ class TestChatbotMediaBatching:
         await engine.set_state(phone, "LIST_PHOTOS")
         await engine.set_data(phone, {"photo_urls": ["https://cdn.example/1.jpg"], "video_urls": []})
 
-        intent_decision = type("IntentDecision", (), {"intent": "unknown"})()
+        intent_decision = SimpleNamespace(intent="unknown", confidence=0.1, source="fallback")
         monkeypatch.setattr("services.chatbot_engine.intent_service.detect_intent", AsyncMock(return_value=intent_decision))
         monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
         send_text = AsyncMock(return_value=True)
@@ -357,7 +357,7 @@ class TestChatbotMediaBatching:
         await engine.set_state(phone, "LIST_PHOTOS")
         await engine.set_data(phone, {"photo_urls": [], "video_urls": []})
 
-        intent_decision = type("IntentDecision", (), {"intent": "unknown"})()
+        intent_decision = SimpleNamespace(intent="unknown", confidence=0.1, source="fallback")
         monkeypatch.setattr("services.chatbot_engine.intent_service.detect_intent", AsyncMock(return_value=intent_decision))
         monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
         monkeypatch.setattr("services.chatbot_engine.whatsapp.get_media_url", AsyncMock(side_effect=["url-1", "url-2", "url-3"]))
@@ -508,6 +508,10 @@ class TestChatbotMediaBatching:
         send_buttons = AsyncMock(return_value=True)
         monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
         monkeypatch.setattr("services.chatbot_engine.whatsapp.send_buttons", send_buttons)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="gratitude", confidence=0.98, source="llm")),
+        )
 
         await engine.process_message(
             phone=phone,
@@ -524,6 +528,45 @@ class TestChatbotMediaBatching:
         send_buttons.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_recent_listing_greeting_does_not_override_new_conversation(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine._remember_listing_outcome(phone, "pending_verification")
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="greeting", confidence=0.98, source="llm")),
+        )
+        monkeypatch.setattr(
+            "services.chatbot_engine.conversation_service.generate_reply",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    reply="Hello. How can I help you today?",
+                    action="none",
+                    confidence=0.9,
+                    source="llm",
+                )
+            ),
+        )
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="Hey G",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert "awaiting verification" not in send_text.await_args.args[1].lower()
+        assert "how can i help you" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
     async def test_start_afresh_clears_recent_context_and_returns_main_menu(self, db, monkeypatch):
         engine = ChatbotEngine(redis_client=FakeRedis())
         phone = "2348012345678"
@@ -535,6 +578,10 @@ class TestChatbotMediaBatching:
         send_list = AsyncMock(return_value=True)
         monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
         monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="restart", confidence=0.99, source="llm")),
+        )
 
         await engine.process_message(
             phone=phone,
@@ -550,6 +597,37 @@ class TestChatbotMediaBatching:
         assert await engine._get_recent_context(phone) == {}
         send_text.assert_not_awaited()
         assert send_list.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_listing_prompt_switch_service_returns_to_main_menu(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine.set_state(phone, "LIST_TITLE")
+        await engine.set_data(phone, {"landlord_id": 1})
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        send_list = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="switch_service", confidence=0.97, source="llm")),
+        )
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="sorry i want to switch to another service",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "MAIN_MENU"
+        assert send_list.await_count >= 1
 
     @pytest.mark.asyncio
     async def test_view_results_start_fresh_search_jumps_to_search_flow(self, db, monkeypatch):
@@ -619,8 +697,44 @@ class TestChatbotMediaBatching:
         )
 
         assert await engine.get_state(phone) == "SEARCH_LOCATION"
-        assert send_text.await_count == 1
-        assert "which neighbourhood" in send_text.await_args.args[1].lower()
+        assert send_text.await_count == 2
+        assert "start a fresh search" in send_text.await_args_list[0].args[1].lower()
+        assert "which neighbourhood" in send_text.await_args_list[1].args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_llm_reply_is_saved_in_conversation_history(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine.set_state(phone, "MAIN_MENU")
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        monkeypatch.setattr("services.chatbot_engine.intent_service.detect_intent", AsyncMock(return_value=SimpleNamespace(intent="unknown", confidence=0.1, source="fallback")))
+        monkeypatch.setattr(
+            "services.chatbot_engine.conversation_service.generate_reply",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    reply="Sure, let us start a fresh search.",
+                    action="search_property",
+                    confidence=0.95,
+                    source="llm",
+                )
+            ),
+        )
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", AsyncMock(return_value=True))
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="let's start a fresh one",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        history = await engine._get_conversation_history(phone)
+        assert any(item["role"] == "user" and "fresh one" in item["content"].lower() for item in history)
+        assert any(item["role"] == "assistant" and "sure, let us start a fresh search" in item["content"].lower() for item in history)
 
     @pytest.mark.asyncio
     async def test_idle_nice_job_gets_polite_close_not_welcome(self, db, monkeypatch):
@@ -632,6 +746,10 @@ class TestChatbotMediaBatching:
         send_buttons = AsyncMock(return_value=True)
         monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
         monkeypatch.setattr("services.chatbot_engine.whatsapp.send_buttons", send_buttons)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="goodbye", confidence=0.98, source="llm")),
+        )
 
         await engine.process_message(
             phone=phone,
@@ -655,6 +773,10 @@ class TestChatbotMediaBatching:
         monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
         send_text = AsyncMock(return_value=True)
         monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="customer_service", confidence=0.98, source="llm")),
+        )
 
         await engine.process_message(
             phone=phone,
