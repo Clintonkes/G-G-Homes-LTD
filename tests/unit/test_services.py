@@ -1,6 +1,7 @@
 """Unit tests covering security helpers and selected service-layer behaviors."""
 
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -93,6 +94,83 @@ class FakeRedis:
 
 
 class TestChatbotMediaBatching:
+    @pytest.mark.asyncio
+    async def test_search_offers_over_budget_matches_when_none_within_budget(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "SEARCH_TYPE")
+        await engine.set_data(
+            phone,
+            {
+                "neighbourhood": "GRA",
+                "max_rent": 100000.0,
+                "property_type": "flat",
+            },
+        )
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        over_budget_prop = SimpleNamespace(
+            id=77,
+            title="Executive Flat",
+            city="Abakaliki",
+            state="Ebonyi",
+            address="12 Oak Street",
+            neighbourhood="GRA",
+            annual_rent=250000.0,
+        )
+        monkeypatch.setattr(
+            "services.chatbot_engine.property_service.search",
+            AsyncMock(side_effect=[[], [over_budget_prop]]),
+        )
+
+        await engine._send_search_results(phone, await engine.get_data(phone), db)
+
+        assert await engine.get_state(phone) == "SEARCH_HIGHER_BUDGET_OFFER"
+        saved = await engine.get_data(phone)
+        assert saved["over_budget_result_ids"] == [77]
+        assert "above your budget" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_search_higher_budget_yes_shows_detailed_results(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "SEARCH_HIGHER_BUDGET_OFFER")
+        await engine.set_data(phone, {"over_budget_result_ids": [1]})
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        property_row = SimpleNamespace(
+            id=1,
+            title="Palm View Apartment",
+            city="Abakaliki",
+            state="Ebonyi",
+            address="5 Unity Close",
+            neighbourhood="GRA",
+            annual_rent=450000.0,
+        )
+        fake_result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [property_row]))
+        monkeypatch.setattr(db, "execute", AsyncMock(return_value=fake_result))
+
+        await engine.handle_search_higher_budget_offer(
+            phone=phone,
+            input_value="yes",
+            _message_type="text",
+            _media_id=None,
+            _user=None,
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "VIEW_RESULTS"
+        assert "location: abakaliki, ebonyi" in send_text.await_args.args[1].lower()
+        assert "address: 5 unity close" in send_text.await_args.args[1].lower()
+        assert "neighbourhood: gra" in send_text.await_args.args[1].lower()
+        assert "price:" in send_text.await_args.args[1].lower()
+
     @pytest.mark.asyncio
     async def test_account_edit_name_updates_user_profile(self, db, monkeypatch):
         engine = ChatbotEngine(redis_client=FakeRedis())

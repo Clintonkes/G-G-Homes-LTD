@@ -29,7 +29,8 @@ CUSTOMER_SERVICE_STATE = "CUSTOMER_SERVICE"
 ACCOUNT_MENU_STATE = "ACCOUNT_MENU"
 ACCOUNT_EDIT_NAME_STATE = "ACCOUNT_EDIT_NAME"
 ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
-SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
+SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
+SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE"}
 ACCOUNT_FLOW_STATES = {ACCOUNT_MENU_STATE, ACCOUNT_EDIT_NAME_STATE, ACCOUNT_EDIT_EMAIL_STATE}
 
@@ -168,6 +169,46 @@ class ChatbotEngine:
     def _pluralize(self, count: int, singular: str, plural: str | None = None) -> str:
         return singular if count == 1 else (plural or f"{singular}s")
 
+    def _is_negative_signal(self, input_value: str | None) -> bool:
+        normalized = self._normalize_text(input_value)
+        if not normalized:
+            return False
+        cleaned = normalized.rstrip("!?. ,")
+        negatives = {
+            "no",
+            "nope",
+            "not now",
+            "dont continue",
+            "don't continue",
+            "search again",
+            "another search",
+            "new search",
+            "change budget",
+        }
+        return cleaned in negatives
+
+
+    def _property_search_result_line(self, index: int, prop: Property) -> str:
+        city = (prop.city or "").strip() or "N/A"
+        state = (prop.state or "").strip() or "N/A"
+        return (
+            f"{index}. {prop.title}\n"
+            f"Location: {city}, {state}\n"
+            f"Address: {prop.address}\n"
+            f"Neighbourhood: {prop.neighbourhood}\n"
+            f"Price: {format_naira(prop.annual_rent)}"
+        )
+
+
+    async def _send_result_selection_prompt(self, phone: str, properties: list[Property]) -> None:
+        lines = [self._property_search_result_line(index, prop) for index, prop in enumerate(properties, start=1)]
+        await whatsapp.send_text(
+            phone,
+            "Here are the available properties we found for you:\n\n"
+            + "\n\n".join(lines)
+            + "\n\nPlease reply with the number of the property you would like to view.",
+        )
+
     def _media_batch_key(self, phone: str, state: str) -> str:
         return f"{MEDIA_BATCH_KEY_PREFIX}{state}:{phone}"
 
@@ -247,6 +288,7 @@ class ChatbotEngine:
             "SEARCH_BUDGET": "Please choose the budget range you would like us to work with.",
             "SEARCH_TYPE": "Please select the property type you prefer.",
             "SEARCH_BEDROOMS": "Please choose the bedroom option that matches what you want.",
+            SEARCH_HIGHER_BUDGET_OFFER_STATE: "We found options above your budget. Please tell us if you want to view them or adjust your budget.",
             "VIEW_RESULTS": "Please reply with the number of the property you would like to view.",
             "VIEW_PROPERTY": "Tap Book Inspection whenever you are ready.",
             "SCHEDULE_DATE": "Please share your preferred inspection date and time. Example: 15/07/2026 10:00.",
@@ -601,13 +643,41 @@ class ChatbotEngine:
             min_bedrooms=data.get("min_bedrooms"),
         )
         data["result_ids"] = [prop.id for prop in properties]
+        data.pop("over_budget_result_ids", None)
+        data.pop("over_budget_max_rent", None)
         await self.set_data(phone, data)
-        await self.set_state(phone, "VIEW_RESULTS")
         if not properties:
+            max_rent = data.get("max_rent")
+            if max_rent is not None:
+                broader_matches = await property_service.search(
+                    db,
+                    neighbourhood=data.get("neighbourhood"),
+                    max_rent=None,
+                    property_type=data.get("property_type"),
+                    bedrooms=data.get("bedrooms"),
+                    min_bedrooms=data.get("min_bedrooms"),
+                )
+                over_budget = [prop for prop in broader_matches if float(prop.annual_rent) > float(max_rent)]
+                if over_budget:
+                    data["over_budget_result_ids"] = [prop.id for prop in over_budget]
+                    data["over_budget_max_rent"] = max_rent
+                    await self.set_data(phone, data)
+                    await self.set_state(phone, SEARCH_HIGHER_BUDGET_OFFER_STATE)
+                    await whatsapp.send_text(
+                        phone,
+                        (
+                            f"We could not find a verified {data.get('property_type', 'property').replace('_', ' ')} in "
+                            f"{data.get('neighbourhood', 'that location')} within {format_naira(float(max_rent))}. "
+                            f"However, we found {len(over_budget)} matching {self._pluralize(len(over_budget), 'property')} above your budget. "
+                            "Would you like to see them? Reply yes to view, or no to search with another budget."
+                        ),
+                    )
+                    return
+            await self.set_state(phone, "VIEW_RESULTS")
             await whatsapp.send_text(phone, "We could not find a verified listing that matches that search just now. If you would like, we can help you start a fresh search immediately.")
             return
-        lines = [f"{index}. {prop.title} - {format_naira(prop.annual_rent)}" for index, prop in enumerate(properties, start=1)]
-        await whatsapp.send_text(phone, "Here are the available properties we found for you:\n" + "\n".join(lines) + "\n\nPlease reply with the number of the property you would like to view.")
+        await self.set_state(phone, "VIEW_RESULTS")
+        await self._send_result_selection_prompt(phone, properties)
 
     async def _offer_resume_or_restart(self, phone: str, user: User, state: str, data: dict) -> None:
         if state == "MAIN_MENU":
@@ -651,6 +721,8 @@ class ChatbotEngine:
             )
         elif state == "SEARCH_BEDROOMS":
             await self._send_flat_bedroom_options(phone)
+        elif state == SEARCH_HIGHER_BUDGET_OFFER_STATE:
+            await whatsapp.send_text(phone, "We found matching properties above your budget. Reply yes to view them, or no to search with another budget.")
         elif state == "VIEW_RESULTS":
             await self._send_search_results(phone, data, db)
         elif state == "LIST_TITLE":
@@ -784,16 +856,17 @@ class ChatbotEngine:
                 await self._handle_unexpected_media(phone, state, data, incoming_media_types)
                 return
 
-        if await self._handle_recent_context_message(phone, input_value, recent_context, active_state):
-            return
-
-        if await self._handle_idle_courtesy_message(phone, input_value, active_state):
-            return
-
         intent = direct_selection
         if not intent:
             intent_decision = await intent_service.detect_intent(input_value if not button_id else button_id, state)
             intent = intent_decision.intent
+
+        # Let LLM/direct intent routing decide first; use courtesy replies only when intent is ambiguous.
+        if intent in {"unknown", "continue"}:
+            if await self._handle_recent_context_message(phone, input_value, recent_context, active_state):
+                return
+            if await self._handle_idle_courtesy_message(phone, input_value, active_state):
+                return
 
         if self._is_greeting(input_value) and not active_state and state != "MAIN_MENU":
             await self._offer_resume_or_restart(phone, user, state, data)
@@ -826,6 +899,7 @@ class ChatbotEngine:
             "SEARCH_BUDGET": self.handle_search_budget,
             "SEARCH_TYPE": self.handle_search_type,
             "SEARCH_BEDROOMS": self.handle_search_bedrooms,
+            SEARCH_HIGHER_BUDGET_OFFER_STATE: self.handle_search_higher_budget_offer,
             "VIEW_RESULTS": self.handle_view_results,
             "VIEW_PROPERTY": self.handle_view_property,
             "SCHEDULE_DATE": self.handle_schedule_date,
@@ -1184,6 +1258,37 @@ class ChatbotEngine:
             return
         await self.set_data(phone, data)
         await self._send_search_results(phone, data, db)
+
+
+    async def handle_search_higher_budget_offer(self, phone, input_value, _message_type, _media_id, _user, db, **kwargs):
+        data = await self.get_data(phone)
+        over_budget_ids = data.get("over_budget_result_ids", [])
+        if not over_budget_ids:
+            await self.set_state(phone, "SEARCH_BUDGET")
+            await self._send_search_budget_options(phone)
+            return
+
+        if self._is_continue_signal(input_value):
+            result = await db.execute(select(Property).where(Property.id.in_(over_budget_ids)))
+            found = result.scalars().all()
+            order_map = {pid: idx for idx, pid in enumerate(over_budget_ids)}
+            properties = sorted(found, key=lambda prop: order_map.get(prop.id, 10**9))
+            data["result_ids"] = [prop.id for prop in properties]
+            await self.set_data(phone, data)
+            await self.set_state(phone, "VIEW_RESULTS")
+            await self._send_result_selection_prompt(phone, properties)
+            return
+
+        if self._is_negative_signal(input_value):
+            await self.set_state(phone, "SEARCH_BUDGET")
+            await whatsapp.send_text(phone, "No problem. Let us try another budget range.")
+            await self._send_search_budget_options(phone)
+            return
+
+        await whatsapp.send_text(
+            phone,
+            "Please reply yes to view the available options above your budget, or no to search with another budget.",
+        )
 
 
     async def handle_view_results(self, phone, input_value, _message_type, _media_id, _user, db, **kwargs):
