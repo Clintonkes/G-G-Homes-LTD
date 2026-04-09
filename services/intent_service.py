@@ -7,7 +7,21 @@ import httpx
 
 from core.config import settings
 
-ALLOWED_INTENTS = {"search_property", "list_property", "my_account", "customer_service", "continue", "unknown"}
+ALLOWED_INTENTS = {
+    "search_property",
+    "list_property",
+    "my_account",
+    "customer_service",
+    "continue",
+    "restart",
+    "decline",
+    "greeting",
+    "gratitude",
+    "status_check",
+    "clarification",
+    "goodbye",
+    "unknown",
+}
 SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {
     "LIST_TITLE",
@@ -97,103 +111,33 @@ class IntentService:
         normalized = self._normalize_text(message)
         if not normalized:
             return IntentDecision(intent="unknown", confidence=0.0, source="fallback")
-
-        listing_terms = [
-            "list my property",
-            "enlist my property",
-            "register my property",
-            "submit my property",
-            "post my property",
-            "advertise my property",
-            "rent out my property",
-            "property for rent",
-            "i want to list",
-            "i want to enlist",
-            "i want to post",
-            "list property",
-            "enlist property",
-        ]
-        search_terms = [
-            "find a house",
-            "find house",
-            "find a home",
-            "search for",
-            "show me houses",
-            "looking for",
-            "need accommodation",
-            "need a place",
-            "search house",
-            "search property",
-        ]
-        account_terms = ["account", "profile", "my details", "my booking", "my appointment"]
-        customer_service_terms = [
-            "customer service",
-            "customer care",
-            "customer support",
-            "support team",
-            "help desk",
-            "complaint",
-            "issue with my account",
-            "issue with my booking",
-            "issue with my listing",
-            "speak to support",
-            "talk to support",
-            "human agent",
-            "live agent",
-            "customer representative",
-        ]
-
-        is_listing = self._contains_any(normalized, listing_terms)
-        is_search = self._contains_any(normalized, search_terms)
-        is_account = self._contains_any(normalized, account_terms)
-        is_customer_service = self._contains_any(normalized, customer_service_terms)
-
-        if current_state in LISTING_FLOW_STATES:
-            if is_customer_service:
-                return IntentDecision(intent="customer_service", confidence=0.86, source="fallback")
-            if is_search:
-                return IntentDecision(intent="search_property", confidence=0.9, source="fallback")
-            if is_account:
-                return IntentDecision(intent="my_account", confidence=0.82, source="fallback")
-            return IntentDecision(intent="continue", confidence=0.95, source="fallback")
-
-        if current_state in SEARCH_FLOW_STATES:
-            if is_customer_service:
-                return IntentDecision(intent="customer_service", confidence=0.86, source="fallback")
-            if is_listing:
-                return IntentDecision(intent="list_property", confidence=0.92, source="fallback")
-            if is_account:
-                return IntentDecision(intent="my_account", confidence=0.82, source="fallback")
-            return IntentDecision(intent="continue", confidence=0.9, source="fallback")
-
-        if is_listing:
-            return IntentDecision(intent="list_property", confidence=0.92, source="fallback")
-        if is_search or any(term in normalized for term in ["house", "home", "apartment", "flat"]):
-            return IntentDecision(intent="search_property", confidence=0.88, source="fallback")
-        if is_account:
-            return IntentDecision(intent="my_account", confidence=0.8, source="fallback")
-        if is_customer_service:
-            return IntentDecision(intent="customer_service", confidence=0.84, source="fallback")
-
         if current_state != "MAIN_MENU":
-            return IntentDecision(intent="continue", confidence=0.65, source="fallback")
+            return IntentDecision(intent="continue", confidence=0.55, source="fallback")
         return IntentDecision(intent="unknown", confidence=0.2, source="fallback")
+
 
     async def _llm_intent(self, message: str, current_state: str) -> IntentDecision | None:
         if not settings.LLM_INTENT_ENABLED or not settings.LLM_INTENT_API_KEY:
             return None
 
         step_hint = self._state_step_hint(current_state)
+
         system_prompt = (
             "You classify WhatsApp real-estate assistant messages into a small set of intents. "
             "Return strict JSON with keys: intent, confidence. "
-            "Allowed intents: search_property, list_property, my_account, customer_service, continue, unknown. "
-            "Respect the current workflow. If the user is already in a listing workflow and their message answers the current step, return continue. "
-            "If the user is already in a property-search workflow and their message answers the current step, return continue. "
-            "If the message means resume, continue previous conversation, proceed, go ahead, or next step, return continue. "
-            "If the user is asking for customer service, support, a complaint path, or a human/support team, return customer_service. "
-            "Only switch to list_property or search_property when the user clearly wants to change direction."
+            "Allowed intents: search_property, list_property, my_account, customer_service, continue, restart, decline, greeting, gratitude, status_check, clarification, goodbye, unknown. "
+            "Use the current workflow state and the user's meaning, not exact wording. "
+            "Return continue when the user is answering the current step, confirming, proceeding, or indicating they are finished with the current step. "
+            "Return restart when the user wants to reset the whole conversation. "
+            "Return search_property when the user wants to begin, restart, or change a property search. "
+            "Return list_property when the user wants to list or submit a property. "
+            "Return my_account when the user wants account or profile help. "
+            "Return customer_service when the user wants support or a human. "
+            "Return decline when the user is rejecting the current suggestion or wants an alternative. "
+            "Return greeting, gratitude, status_check, clarification, or goodbye when those are the user's primary intent. "
+            "Do not depend on specific phrases; infer the intent semantically."
         )
+        
         user_prompt = (
             f"Current state: {current_state}\n"
             f"Current step hint: {step_hint}\n"

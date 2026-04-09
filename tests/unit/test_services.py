@@ -552,6 +552,77 @@ class TestChatbotMediaBatching:
         assert send_list.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_view_results_start_fresh_search_jumps_to_search_flow(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine.set_state(phone, "VIEW_RESULTS")
+        await engine.set_data(phone, {"result_ids": [1]})
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="search_property", confidence=0.98, source="llm")),
+        )
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="I want to start a fresh search",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "SEARCH_LOCATION"
+        assert send_text.await_count == 1
+        assert "which neighbourhood" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_view_results_free_text_uses_llm_reply_to_route(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine.set_state(phone, "VIEW_RESULTS")
+        await engine.set_data(phone, {"result_ids": [1]})
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="unknown", confidence=0.1, source="fallback")),
+        )
+        monkeypatch.setattr(
+            "services.chatbot_engine.conversation_service.generate_reply",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    reply="Certainly. Let us start a fresh search.",
+                    action="search_property",
+                    confidence=0.94,
+                    source="llm",
+                )
+            ),
+        )
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="can we search again?",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "SEARCH_LOCATION"
+        assert send_text.await_count == 1
+        assert "which neighbourhood" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
     async def test_idle_nice_job_gets_polite_close_not_welcome(self, db, monkeypatch):
         engine = ChatbotEngine(redis_client=FakeRedis())
         phone = "2348012345678"

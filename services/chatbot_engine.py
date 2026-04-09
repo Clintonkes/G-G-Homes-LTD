@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from database.models import Appointment, AppointmentStatus, Payment, Property, PropertyStatus, PropertyType, Subscription, User, UserRole
+from services.conversation_service import conversation_service
 from services.intent_service import intent_service
 from services.media_service import media_service
 from services.property_service import property_service
@@ -88,105 +89,8 @@ class ChatbotEngine:
         }
         return mapping.get(normalized)
 
-    def _is_done_message(self, input_value: str | None) -> bool:
-        normalized = self._normalize_text(input_value)
-        if not normalized:
-            return False
-        # Strip punctuation and common suffixes for better matching
-        cleaned = normalized.rstrip("!?. ,")
-        # Exact matches - comprehensive set
-        done_patterns = {
-            "done", "finished", "i am done", "that is all", "that's all", "complete",
-            "done sending", "done sendin", "sent all", "all sent", "done with photos",
-            "done for now", "finis", "all pictures sent", "completed", "done uploading",
-            "no more", "thats all", "i'm done", "im done", "that will be all",
-            "ive sent all", "i've sent all", "enough", "thats enough", "that's enough",
-            "yes done", "yes im done", "proceed", "go ahead", "next", "move on",
-            "continue", "we are done", "we're done", "we done", "thats it",
-            "that's it", "nothing more", "no more photos", "no more pics",
-            "no more pictures", "no more images", "no more videos",
-        }
-        if cleaned in done_patterns:
-            return True
-        # Check for presence of key phrases in longer messages
-        done_phrases = [
-            "done now", "done with", "already done", "i am done", "i'm done",
-            "im done", "done sending", "sent everything", "all done",
-            "finished sending", "go ahead", "move on", "proceed now",
-            "that should be", "nothing else", "you can proceed",
-            "please proceed", "continue to", "go to the next",
-        ]
-        if any(phrase in cleaned for phrase in done_phrases):
-            return True
-        return False
-
-    def _is_continue_signal(self, input_value: str | None) -> bool:
-        """Detect short affirmative or progress signals like 'yes', 'ok', 'continue'."""
-        normalized = self._normalize_text(input_value)
-        if not normalized:
-            return False
-        cleaned = normalized.rstrip("!?. ,")
-        signals = {
-            "yes", "ok", "okay", "sure", "continue", "proceed", "next",
-            "go ahead", "move on", "go on", "yeah", "yep", "yup", "alright",
-            "fine", "go", "forward", "ahead",
-        }
-        if cleaned in signals:
-            return True
-
-        phrase_signals = [
-            "lets continue",
-            "let's continue",
-            "let us continue",
-            "continue our previous conversation",
-            "continue previous conversation",
-            "continue where we stopped",
-            "continue where we left off",
-            "resume previous conversation",
-            "resume our previous conversation",
-            "resume where we stopped",
-            "resume where we left off",
-        ]
-        if any(phrase in cleaned for phrase in phrase_signals):
-            return True
-        if cleaned.startswith("continue ") or cleaned.startswith("resume "):
-            return True
-        return False
-
-    def _is_greeting(self, input_value: str | None) -> bool:
-        normalized = self._normalize_text(input_value)
-        if not normalized:
-            return False
-        cleaned = normalized.rstrip("!?. ,")
-        greetings = {"hello", "hi", "hey", "good morning", "good afternoon", "good evening", "good day"}
-        return cleaned in greetings
-
-    def _is_clarification_request(self, input_value: str | None) -> bool:
-        normalized = self._normalize_text(input_value)
-        prompts = ["what do you mean", "what are amenities", "which amenities", "example", "examples", "help", "explain"]
-        return normalized.endswith("?") or any(prompt in normalized for prompt in prompts)
-
     def _pluralize(self, count: int, singular: str, plural: str | None = None) -> str:
         return singular if count == 1 else (plural or f"{singular}s")
-
-    def _is_negative_signal(self, input_value: str | None) -> bool:
-        normalized = self._normalize_text(input_value)
-        if not normalized:
-            return False
-        cleaned = normalized.rstrip("!?. ,")
-        negatives = {
-            "no",
-            "nope",
-            "not now",
-            "dont continue",
-            "don't continue",
-            "search again",
-            "another search",
-            "new search",
-            "change budget",
-        }
-        return cleaned in negatives
-
 
     def _property_search_result_line(self, index: int, prop: Property) -> str:
         city = (prop.city or "").strip() or "N/A"
@@ -215,64 +119,6 @@ class ChatbotEngine:
     def _recent_context_key(self, phone: str) -> str:
         return f"{RECENT_CONTEXT_KEY_PREFIX}{phone}"
 
-    def _is_gratitude_message(self, input_value: str | None) -> bool:
-        normalized = self._normalize_text(input_value)
-        if not normalized:
-            return False
-        gratitude_patterns = {
-            "thank you", "thanks", "thank u", "thanks a lot", "many thanks",
-            "thank you so much", "thanks so much", "thank you very much", "tnx",
-            "thx", "okay thanks", "ok thanks", "alright thanks",
-        }
-        if normalized in gratitude_patterns:
-            return True
-        gratitude_phrases = ["thank you", "thanks", "many thanks", "appreciate it", "grateful"]
-        return any(phrase in normalized for phrase in gratitude_phrases)
-
-    def _is_status_check_message(self, input_value: str | None) -> bool:
-        normalized = self._normalize_text(input_value)
-        if not normalized:
-            return False
-        exact = {"status", "update", "any update", "progress", "how far", "what is the update"}
-        if normalized in exact:
-            return True
-        phrases = ["any update", "status of", "what is the status", "how far", "give me an update"]
-        return any(phrase in normalized for phrase in phrases)
-
-    def _is_end_of_conversation_message(self, input_value: str | None) -> bool:
-        normalized = self._normalize_text(input_value)
-        if not normalized:
-            return False
-        cleaned = normalized.rstrip("!?. ,")
-        exact = {
-            "bye", "goodbye", "see you", "see you later", "talk later", "catch you later",
-            "nice job", "good job", "great job", "nice one", "well done", "good work",
-            "that is all", "that's all", "thats all", "all good", "we are good",
-            "we're good", "ok bye", "okay bye", "thanks bye", "thank you bye",
-        }
-        if cleaned in exact:
-            return True
-        phrases = ["nice job", "good job", "great job", "well done", "see you", "talk later"]
-        return any(phrase in cleaned for phrase in phrases)
-
-    def _is_customer_service_request(self, input_value: str | None) -> bool:
-        normalized = self._normalize_text(input_value)
-        if not normalized:
-            return False
-        phrases = [
-            "customer service",
-            "customer care",
-            "customer support",
-            "support team",
-            "help desk",
-            "human agent",
-            "live agent",
-            "speak to support",
-            "talk to support",
-            "customer representative",
-        ]
-        return any(phrase in normalized for phrase in phrases)
-
     def _describe_listing_status(self, status: str | None) -> str:
         if status == PropertyStatus.pending_verification.value:
             return "awaiting verification"
@@ -281,6 +127,7 @@ class ChatbotEngine:
         if not status:
             return "under review"
         return status.replace("_", " ")
+
 
     def _state_instruction_text(self, state: str, data: dict) -> str:
         prompts = {
@@ -311,8 +158,10 @@ class ChatbotEngine:
         }
         return prompts.get(state, "Please continue with the current step and we will guide you.")
 
+
     async def _set_recent_context(self, phone: str, payload: dict) -> None:
         await self.redis.set(self._recent_context_key(phone), json.dumps(payload), ex=settings.REDIS_RESUME_TTL_SECONDS)
+
 
     async def _get_recent_context(self, phone: str) -> dict:
         payload = await self.redis.get(self._recent_context_key(phone))
@@ -355,7 +204,7 @@ class ChatbotEngine:
         latest = await self.redis.get(self._media_batch_key(phone, state))
         return latest == token
 
-    async def _handle_recent_context_message(self, phone: str, input_value: str | None, recent_context: dict, active_state: str | None) -> bool:
+    async def _handle_recent_context_message(self, phone: str, input_value: str | None, recent_context: dict, active_state: str | None, current_state: str | None) -> bool:
         if active_state or not recent_context:
             return False
         context_kind = recent_context.get("kind")
@@ -373,27 +222,29 @@ class ChatbotEngine:
                     summary_text = f"Your recent inspection booking is confirmed for {parsed_date:%d/%m/%Y %H:%M}."
                 except ValueError:
                     pass
-        if self._is_gratitude_message(input_value):
+        intent = (await intent_service.detect_intent(input_value, current_state or "MAIN_MENU")).intent
+        if intent == "gratitude":
             await whatsapp.send_text(phone, f"You are welcome. {summary_text} We will keep you updated here as soon as there is progress.")
             return True
-        if self._is_greeting(input_value):
+        if intent == "greeting":
             await whatsapp.send_text(phone, f"Hello again. {summary_text} We will keep you updated here. If you need anything else, say menu.")
             return True
-        if self._is_status_check_message(input_value):
+        if intent == "status_check":
             await whatsapp.send_text(phone, f"{summary_text} We will send the next update here as soon as there is progress.")
             return True
-        if self._is_end_of_conversation_message(input_value):
+        if intent == "goodbye":
             await whatsapp.send_text(phone, f"Thank you for chatting with G & G Homes. {summary_text} We are here whenever you need us.")
             return True
         return False
 
-    async def _handle_idle_courtesy_message(self, phone: str, input_value: str | None, active_state: str | None) -> bool:
+    async def _handle_idle_courtesy_message(self, phone: str, input_value: str | None, active_state: str | None, current_state: str | None) -> bool:
         if active_state:
             return False
-        if self._is_gratitude_message(input_value):
+        intent = (await intent_service.detect_intent(input_value, current_state or "MAIN_MENU")).intent
+        if intent == "gratitude":
             await whatsapp.send_text(phone, "You are welcome. We are here whenever you need us. Just say menu if you would like to continue.")
             return True
-        if self._is_end_of_conversation_message(input_value):
+        if intent == "goodbye":
             await whatsapp.send_text(phone, "Thank you for chatting with G & G Homes. We are here whenever you need us. Just say menu any time.")
             return True
         return False
@@ -771,6 +622,65 @@ class ChatbotEngine:
         else:
             await self.send_main_menu(phone, user=await self._get_or_create_user(phone, db))
 
+    def _conversation_data_context(self, state: str, data: dict, recent_context: dict | None = None) -> dict:
+        context = {
+            "state": state,
+            "state_instruction": self._state_instruction_text(state, data),
+        }
+        if data:
+            context["data"] = {
+                "keys": sorted(data.keys()),
+                "result_count": len(data.get("result_ids", []) or []),
+                "over_budget_count": len(data.get("over_budget_result_ids", []) or []),
+                "has_selected_property": bool(data.get("selected_property_id")),
+                "has_resume_snapshot": bool(data.get("resume_target_state")),
+            }
+        if recent_context:
+            context["recent_context"] = recent_context
+        return context
+
+    async def _send_llm_conversational_reply(
+        self,
+        phone: str,
+        input_value: str | None,
+        state: str,
+        data: dict,
+        user: User,
+        db: AsyncSession,
+        recent_context: dict | None = None,
+    ) -> bool:
+        llm_reply = await conversation_service.generate_reply(
+            message=input_value or "",
+            current_state=state,
+            state_instruction=self._state_instruction_text(state, data),
+            recent_context=recent_context,
+            data_context=self._conversation_data_context(state, data, recent_context),
+        )
+        if not llm_reply:
+            return False
+
+        if llm_reply.action == "restart":
+            await self.reset_conversation(phone, clear_recent_context=True)
+            await self.send_main_menu(phone, user)
+            return True
+        if llm_reply.action == "search_property":
+            await self._start_property_search(phone)
+            return True
+        if llm_reply.action == "list_property":
+            await self._start_property_listing(phone, user)
+            return True
+        if llm_reply.action == "my_account":
+            await self._open_account_service(phone, user, db)
+            return True
+        if llm_reply.action == "customer_service":
+            await self._open_customer_service(phone, state, data, db)
+            return True
+
+        if llm_reply.reply:
+            await whatsapp.send_text(phone, llm_reply.reply)
+            return True
+        return False
+
     async def send_main_menu(self, phone: str, user: User) -> None:
         await self.set_state(phone, "MAIN_MENU")
         name = self._display_name(user)
@@ -837,11 +747,6 @@ class ChatbotEngine:
             await self.send_main_menu(phone, user)
             return
 
-        if self._is_new_start_signal(input_value):
-            await self.reset_conversation(phone, clear_recent_context=True)
-            await self.send_main_menu(phone, user)
-            return
-
         # Guardrails for media sent in the wrong stage.
         media_items = media_items or ([{"type": message_type, "id": media_id}] if message_type in ["image", "video", "document"] and media_id else None)
         incoming_media_types = {item.get("type") for item in (media_items or []) if item.get("type")}
@@ -861,35 +766,40 @@ class ChatbotEngine:
             intent_decision = await intent_service.detect_intent(input_value if not button_id else button_id, state)
             intent = intent_decision.intent
 
-        # Let LLM/direct intent routing decide first; use courtesy replies only when intent is ambiguous.
-        if intent in {"unknown", "continue"}:
-            if await self._handle_recent_context_message(phone, input_value, recent_context, active_state):
+        if intent == "restart":
+            await self.reset_conversation(phone, clear_recent_context=True)
+            await self.send_main_menu(phone, user)
+            return
+
+        if intent == "search_property":
+            await self._start_property_search(phone)
+            return
+
+        if intent == "list_property":
+            await self._start_property_listing(phone, user)
+            return
+
+        if intent == "my_account":
+            await self._open_account_service(phone, user, db)
+            return
+
+        if intent == "customer_service":
+            await self._open_customer_service(phone, state, data, db)
+            return
+
+        # Let LLM/direct intent routing decide first; use courtesy replies only when intent is social or ambiguous.
+        if intent in {"unknown", "continue", "greeting", "gratitude", "status_check", "goodbye", "clarification"}:
+            if await self._handle_recent_context_message(phone, input_value, recent_context, active_state, state):
                 return
-            if await self._handle_idle_courtesy_message(phone, input_value, active_state):
+            if await self._handle_idle_courtesy_message(phone, input_value, active_state, state):
                 return
 
-        if self._is_greeting(input_value) and not active_state and state != "MAIN_MENU":
+        if intent == "greeting" and not active_state and state != "MAIN_MENU":
             await self._offer_resume_or_restart(phone, user, state, data)
             return
 
         if state == RESUME_PROMPT_STATE:
-            await self.handle_resume_prompt(phone, input_value, user, db)
-            return
-
-        if intent == "customer_service" or self._is_customer_service_request(input_value):
-            await self._open_customer_service(phone, state, data, db)
-            return
-
-        if intent == "search_property" and state not in SEARCH_FLOW_STATES and state not in LISTING_FLOW_STATES:
-            await self._start_property_search(phone)
-            return
-
-        if intent == "list_property" and state not in LISTING_FLOW_STATES:
-            await self._start_property_listing(phone, user)
-            return
-
-        if intent == "my_account" and state not in SEARCH_FLOW_STATES and state not in LISTING_FLOW_STATES:
-            await self._open_account_service(phone, user, db)
+            await self.handle_resume_prompt(phone, input_value, user, db, intent=intent)
             return
 
         # State-specific handlers keep each workflow step isolated and testable.
@@ -929,36 +839,35 @@ class ChatbotEngine:
         handler = handler_map.get(state, self.handle_main_menu)
 
         if state == "LIST_PHOTOS":
-            await handler(phone, input_value, message_type, media_id, user, db, media_items)
+            await handler(phone, input_value, message_type, media_id, user, db, media_items, intent=intent)
             return
         if state == "LIST_DOCUMENTS":
-            await handler(phone, input_value, message_type, media_id, user, db, media_items)
+            await handler(phone, input_value, message_type, media_id, user, db, media_items, intent=intent)
             return
-        await handler(phone, input_value, message_type, media_id, user, db)
+        await handler(phone, input_value, message_type, media_id, user, db, intent=intent)
 
-    def _is_new_start_signal(self, input_value: str | None) -> bool:
-        """Detect free-text signals meaning the user wants a fresh start."""
-        normalized = self._normalize_text(input_value)
-        if not normalized:
-            return False
-        cleaned = normalized.rstrip("!?. ,")
-        exact = {
-            "new", "fresh", "afresh", "restart", "reset", "start over",
-            "start fresh", "start afresh", "start new", "begin again",
-            "fresh start", "new start", "new conversation", "lets start afresh",
-            "let's start afresh", "let us start afresh", "start from scratch",
-            "from scratch", "scratch",
-        }
-        if cleaned in exact:
-            return True
-        subphrases = ["start afresh", "start fresh", "start new", "start over", "begin again", "from scratch"]
-        return any(p in normalized for p in subphrases)
-
-    async def handle_resume_prompt(self, phone: str, input_value: str | None, user: User, db: AsyncSession) -> None:
+    async def handle_resume_prompt(self, phone: str, input_value: str | None, user: User, db: AsyncSession, intent: str | None = None) -> None:
         data = await self.get_data(phone)
 
-        is_resume = input_value == "resume_previous" or self._is_continue_signal(input_value)
-        is_new = input_value == "resume_new" or self._is_new_start_signal(input_value)
+        is_resume = input_value == "resume_previous" or intent == "continue"
+        is_new = input_value == "resume_new" or intent == "restart"
+
+        if is_new:
+            await self.reset_conversation(phone, clear_recent_context=True)
+            await self.send_main_menu(phone, user)
+            return
+        if intent == "search_property":
+            await self._start_property_search(phone)
+            return
+        if intent == "list_property":
+            await self._start_property_listing(phone, user)
+            return
+        if intent == "my_account":
+            await self._open_account_service(phone, user, db)
+            return
+        if intent == "customer_service":
+            await self._open_customer_service(phone, "MAIN_MENU", data, db)
+            return
 
         if is_resume:
             target_state = data.get("resume_target_state", "MAIN_MENU")
@@ -982,6 +891,7 @@ class ChatbotEngine:
             ],
         )
 
+
     async def handle_main_menu(self, phone, input_value, _message_type, _media_id, user, _db, **kwargs):
         direct_selection = self._resolve_service_selection(input_value)
         intent = direct_selection or (await intent_service.detect_intent(input_value, "MAIN_MENU")).intent
@@ -997,7 +907,8 @@ class ChatbotEngine:
         if intent == "customer_service":
             await whatsapp.send_text(phone, "Customer service is here to help. Tell us whether you need listing support, booking help, account help, or help finding a property.")
             return
-        await whatsapp.send_text(phone, "We are here to help. Please choose one of the options below, or tell us whether you would like to find a home, list a property, or check your account.")
+        if await self._send_llm_conversational_reply(phone, input_value, "MAIN_MENU", await self.get_data(phone), user, kwargs.get("db") or _db, await self._get_recent_context(phone)):
+            return
         await self.send_main_menu(phone, user)
 
     async def handle_customer_service(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
@@ -1005,7 +916,9 @@ class ChatbotEngine:
         previous_state = data.get("support_previous_state", "MAIN_MENU")
         previous_data = data.get("support_previous_data", {})
 
-        if self._is_continue_signal(input_value):
+        intent = kwargs.get("intent") or (await intent_service.detect_intent(input_value, CUSTOMER_SERVICE_STATE)).intent
+
+        if intent == "continue":
             await self._write_active_data(phone, previous_data)
             await self._write_active_state(phone, previous_state)
             await self._save_resume_snapshot(phone, previous_state, previous_data)
@@ -1013,7 +926,6 @@ class ChatbotEngine:
             await self._prompt_for_state(phone, previous_state, previous_data, db)
             return
 
-        intent = (await intent_service.detect_intent(input_value, CUSTOMER_SERVICE_STATE)).intent
         if intent == "search_property":
             await self._start_property_search(phone)
             return
@@ -1023,12 +935,14 @@ class ChatbotEngine:
         if intent == "my_account":
             await self._open_account_service(phone, user, db)
             return
-        if self._is_status_check_message(input_value):
+        if intent == "status_check":
             recent_context = await self._get_recent_context(phone)
-            if await self._handle_recent_context_message(phone, input_value, recent_context, active_state=None):
+            if await self._handle_recent_context_message(phone, input_value, recent_context, active_state=None, current_state=CUSTOMER_SERVICE_STATE):
                 return
-        if self._is_gratitude_message(input_value) or self._is_end_of_conversation_message(input_value):
+        if intent in {"gratitude", "goodbye"}:
             await whatsapp.send_text(phone, "You are welcome. If you need anything else, just say menu and we will continue from there.")
+            return
+        if await self._send_llm_conversational_reply(phone, input_value, CUSTOMER_SERVICE_STATE, data, user, db, await self._get_recent_context(phone)):
             return
         await whatsapp.send_text(phone, "Customer service can help with listing updates, booking questions, account support, and finding a property. Please tell us which one you need, or say continue to resume your previous conversation.")
 
@@ -1172,6 +1086,8 @@ class ChatbotEngine:
         if intent == "customer_service":
             await self._open_customer_service(phone, ACCOUNT_MENU_STATE, await self.get_data(phone), db)
             return
+        if await self._send_llm_conversational_reply(phone, input_value, ACCOUNT_MENU_STATE, await self.get_data(phone), user, db, await self._get_recent_context(phone)):
+            return
         await whatsapp.send_text(phone, "Please choose one of the account options so we can show the exact section you need.")
         await self._open_account_service(phone, user, db)
 
@@ -1263,12 +1179,13 @@ class ChatbotEngine:
     async def handle_search_higher_budget_offer(self, phone, input_value, _message_type, _media_id, _user, db, **kwargs):
         data = await self.get_data(phone)
         over_budget_ids = data.get("over_budget_result_ids", [])
+        intent = kwargs.get("intent") or (await intent_service.detect_intent(input_value, SEARCH_HIGHER_BUDGET_OFFER_STATE)).intent
         if not over_budget_ids:
             await self.set_state(phone, "SEARCH_BUDGET")
             await self._send_search_budget_options(phone)
             return
 
-        if self._is_continue_signal(input_value):
+        if intent == "continue":
             result = await db.execute(select(Property).where(Property.id.in_(over_budget_ids)))
             found = result.scalars().all()
             order_map = {pid: idx for idx, pid in enumerate(over_budget_ids)}
@@ -1279,12 +1196,14 @@ class ChatbotEngine:
             await self._send_result_selection_prompt(phone, properties)
             return
 
-        if self._is_negative_signal(input_value):
+        if intent == "decline":
             await self.set_state(phone, "SEARCH_BUDGET")
             await whatsapp.send_text(phone, "No problem. Let us try another budget range.")
             await self._send_search_budget_options(phone)
             return
 
+        if await self._send_llm_conversational_reply(phone, input_value, SEARCH_HIGHER_BUDGET_OFFER_STATE, data, _user, db, await self._get_recent_context(phone)):
+            return
         await whatsapp.send_text(
             phone,
             "Please reply yes to view the available options above your budget, or no to search with another budget.",
@@ -1292,7 +1211,17 @@ class ChatbotEngine:
 
 
     async def handle_view_results(self, phone, input_value, _message_type, _media_id, _user, db, **kwargs):
+        intent = kwargs.get("intent") or (await intent_service.detect_intent(input_value, "VIEW_RESULTS")).intent
+        if intent == "restart":
+            await self.reset_conversation(phone, clear_recent_context=True)
+            await self.send_main_menu(phone, await self._get_or_create_user(phone, db))
+            return
+        if intent == "search_property":
+            await self._start_property_search(phone)
+            return
         if not input_value or not input_value.isdigit():
+            if await self._send_llm_conversational_reply(phone, input_value, "VIEW_RESULTS", await self.get_data(phone), _user, db, await self._get_recent_context(phone)):
+                return
             await whatsapp.send_text(phone, "Please reply with the number of the property you would like us to open for you, or tell us if you would prefer to start a fresh search or list a property.")
             return
         data = await self.get_data(phone)
@@ -1466,7 +1395,8 @@ class ChatbotEngine:
 
 
     async def handle_list_amenities(self, phone, input_value, *_args, **kwargs):
-        if self._is_clarification_request(input_value):
+        intent = kwargs.get("intent") or (await intent_service.detect_intent(input_value, "LIST_AMENITIES")).intent
+        if intent == "clarification":
             await whatsapp.send_text(phone, "Amenities are the useful features that come with the property, such as water supply, prepaid meter, POP finishing, fenced compound, parking space, security, or wardrobes. Please list the available amenities, separated by commas.")
             return
         data = await self.get_data(phone)
@@ -1493,9 +1423,10 @@ class ChatbotEngine:
         photo_urls = data.get("photo_urls", [])
         video_urls = data.get("video_urls", [])
         total_media = len(photo_urls) + len(video_urls)
+        intent = _kwargs.get("intent") or (await intent_service.detect_intent(input_value, "LIST_PHOTOS")).intent
 
         # Progress to the next step only when user explicitly confirms completion.
-        if self._is_done_message(input_value) or self._is_continue_signal(input_value):
+        if intent == "continue":
             if total_media < 3:
                 await whatsapp.send_text(phone, f"We need at least 3 clear photos or videos before we can continue. So far we have received {total_media}. Please send {3 - total_media} more.")
                 return
@@ -1674,13 +1605,14 @@ class ChatbotEngine:
     async def handle_list_documents(self, phone, input_value, message_type, media_id, _user, db, media_items=None, **_kwargs):
         data = await self.get_data(phone)
         doc_urls = data.get("document_urls", [])
+        intent = _kwargs.get("intent") or (await intent_service.detect_intent(input_value, "LIST_DOCUMENTS")).intent
 
         if message_type == "text" and doc_urls:
             await self.set_state(phone, "LIST_LEGAL_REP")
             await whatsapp.send_text(phone, "Thank you. Please share the phone number of a legal representative we should keep on this listing.")
             return
 
-        if self._is_done_message(input_value) or self._is_continue_signal(input_value):
+        if intent == "continue":
             if not doc_urls:
                 await whatsapp.send_text(phone, "Please upload at least one ownership document before replying with done.")
                 return

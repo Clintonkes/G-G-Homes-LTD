@@ -39,7 +39,7 @@ class TestIntentService:
         )
 
         decision = await service.detect_intent("show me houses", "MAIN_MENU")
-        assert decision.intent == "search_property"
+        assert decision.intent == "unknown"
         assert decision.source == "fallback"
 
     @pytest.mark.asyncio

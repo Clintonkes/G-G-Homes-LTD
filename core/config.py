@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     LLM_INTENT_MAX_TOKENS: int = 80
     LLM_INTENT_ALWAYS_USE: bool = True
 
+    LLM_CHAT_ENABLED: bool = False
+    LLM_CHAT_API_URL: str = "https://api.openai.com/v1/responses"
+    LLM_CHAT_API_KEY: str = ""
+    LLM_CHAT_MODEL: str = "gpt-4o-mini"
+    LLM_CHAT_TIMEOUT_SECONDS: int = 20
+    LLM_CHAT_TEMPERATURE: float = 0.4
+    LLM_CHAT_MAX_TOKENS: int = 300
+
     TRANSACTION_FEE_PERCENT: float = 4.0
     BASIC_SUBSCRIPTION_MONTHLY: int = 1500
     STANDARD_SUBSCRIPTION_MONTHLY: int = 3000
