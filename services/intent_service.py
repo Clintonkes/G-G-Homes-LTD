@@ -23,7 +23,7 @@ ALLOWED_INTENTS = {
     "goodbye",
     "unknown",
 }
-SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
+SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {
     "LIST_TITLE",
     "LIST_ADDRESS",
@@ -82,6 +82,8 @@ class IntentService:
             "SEARCH_BEDROOMS": "expects preferred bedroom count",
             "VIEW_RESULTS": "expects selected property number",
             "SCHEDULE_DATE": "expects preferred inspection date and time",
+            "SCHEDULE_VISITOR_NAME": "expects inspection visitor full name",
+            "SCHEDULE_VISITOR_ADDRESS": "expects inspection visitor address",
             "SCHEDULE_CONFIRM": "expects confirmation to complete booking",
         }
         return hints.get(current_state, "expects continuation of current flow")

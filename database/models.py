@@ -104,6 +104,7 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(200), default="WhatsApp User")
     phone_number: Mapped[str] = mapped_column(String(20), unique=True, index=True)
     email: Mapped[str | None] = mapped_column(String(200), unique=True, nullable=True)
+    residential_address: Mapped[str | None] = mapped_column(String(500), nullable=True)
     hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Access and onboarding/verification state
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.tenant)
@@ -183,6 +184,9 @@ class Appointment(Base):
     scheduled_date: Mapped[DateTime] = mapped_column(DateTime(timezone=True))
     status: Mapped[AppointmentStatus] = mapped_column(Enum(AppointmentStatus), default=AppointmentStatus.confirmed)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tenant_full_name_snapshot: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    tenant_phone_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    tenant_address_snapshot: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # Audit timestamp
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

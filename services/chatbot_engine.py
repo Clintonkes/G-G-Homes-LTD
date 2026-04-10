@@ -35,9 +35,10 @@ ACCOUNT_MENU_STATE = "ACCOUNT_MENU"
 ACCOUNT_EDIT_NAME_STATE = "ACCOUNT_EDIT_NAME"
 ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
-SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
+SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_WATER", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE"}
 ACCOUNT_FLOW_STATES = {ACCOUNT_MENU_STATE, ACCOUNT_EDIT_NAME_STATE, ACCOUNT_EDIT_EMAIL_STATE}
+STRICT_INTERRUPT_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_WATER", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
 LLM_ROUTING_ACTIONS = {"restart", "switch_service", "search_property", "list_property", "my_account", "customer_service"}
 
 
@@ -587,7 +588,7 @@ class ChatbotEngine(ChatbotConversationMixin):
             await self._open_customer_service(phone, state, data, db)
             return
 
-        if await self._handle_llm_interrupt(phone, input_value, state, data, user, db, recent_context):
+        if state not in STRICT_INTERRUPT_STATES and await self._handle_llm_interrupt(phone, input_value, state, data, user, db, recent_context):
             return
 
         # Let LLM/direct intent routing decide first; use courtesy replies only when intent is social or ambiguous.
@@ -617,6 +618,8 @@ class ChatbotEngine(ChatbotConversationMixin):
             "VIEW_RESULTS": self.handle_view_results,
             "VIEW_PROPERTY": self.handle_view_property,
             "SCHEDULE_DATE": self.handle_schedule_date,
+            "SCHEDULE_VISITOR_NAME": self.handle_schedule_visitor_name,
+            "SCHEDULE_VISITOR_ADDRESS": self.handle_schedule_visitor_address,
             "SCHEDULE_CONFIRM": self.handle_schedule_confirm,
             "AWAIT_PAYMENT": self.handle_await_payment,
             CUSTOMER_SERVICE_STATE: self.handle_customer_service,
@@ -1075,10 +1078,53 @@ class ChatbotEngine(ChatbotConversationMixin):
             return
         data = await self.get_data(phone)
         data["scheduled_date"] = scheduled_date.isoformat()
-        prop = await db.get(Property, data["selected_property_id"])
         await self.set_data(phone, data)
+        await self.set_state(phone, "SCHEDULE_VISITOR_NAME")
+        await whatsapp.send_text(phone, "Please share your full name for the inspection record.")
+
+
+    async def handle_schedule_visitor_name(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
+        full_name = (input_value or "").strip()
+        if len(full_name.split()) < 2:
+            await whatsapp.send_text(phone, "Please send your full name, for example Firstname Lastname.")
+            return
+        data = await self.get_data(phone)
+        data["inspection_contact_name"] = full_name
+        await self.set_data(phone, data)
+        user.full_name = full_name
+        await db.commit()
+        await db.refresh(user)
+        await self.set_state(phone, "SCHEDULE_VISITOR_ADDRESS")
+        await whatsapp.send_text(phone, "Please share the address for the inspection record.")
+
+
+    async def handle_schedule_visitor_address(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
+        address = (input_value or "").strip()
+        if len(address) < 8:
+            await whatsapp.send_text(phone, "Please send a more detailed address for the inspection record.")
+            return
+        data = await self.get_data(phone)
+        data["inspection_contact_address"] = address
+        await self.set_data(phone, data)
+        user.residential_address = address
+        await db.commit()
+        await db.refresh(user)
         await self.set_state(phone, "SCHEDULE_CONFIRM")
-        await whatsapp.send_buttons(phone, f"Kindly confirm your inspection for {prop.title} on {scheduled_date:%d/%m/%Y %H:%M}.", [{"id": "confirm_booking", "title": "Confirm"}])
+        prop = await db.get(Property, data["selected_property_id"])
+        scheduled_at = datetime.fromisoformat(data["scheduled_date"])
+        inspection_phone = format_phone_number(user.phone_number)
+        confirmation_text = (
+            "Inspection summary\n"
+            f"Property: {prop.title}\n"
+            f"Location: {(prop.city or 'N/A')}, {(prop.state or 'N/A')}\n"
+            f"Address: {prop.address}\n"
+            f"Rent: {format_naira(prop.annual_rent)}\n"
+            f"Date: {scheduled_at:%d/%m/%Y %H:%M}\n"
+            f"Name: {data.get('inspection_contact_name', user.full_name or 'Not set')}\n"
+            f"Address: {data.get('inspection_contact_address', user.residential_address or 'Not set')}\n"
+            f"Phone: {inspection_phone}"
+        )
+        await whatsapp.send_buttons(phone, confirmation_text, [{"id": "confirm_booking", "title": "Confirm"}])
 
 
     async def handle_schedule_confirm(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
@@ -1093,6 +1139,9 @@ class ChatbotEngine(ChatbotConversationMixin):
             landlord_id=prop.landlord_id,
             scheduled_date=datetime.fromisoformat(data["scheduled_date"]),
             status=AppointmentStatus.confirmed,
+            tenant_full_name_snapshot=data.get("inspection_contact_name") or user.full_name,
+            tenant_phone_snapshot=format_phone_number(user.phone_number),
+            tenant_address_snapshot=data.get("inspection_contact_address") or user.residential_address,
         )
         db.add(appointment)
         await db.commit()

@@ -45,6 +45,7 @@ class UserRead(ORMBase):
     full_name: str
     phone_number: str
     email: EmailStr | None = None
+    residential_address: str | None = None
     role: UserRole
     is_active: bool
     is_admin: bool
@@ -109,6 +110,9 @@ class AppointmentCreate(BaseModel):
     landlord_id: int
     scheduled_date: datetime
     notes: str | None = None
+    tenant_full_name_snapshot: str | None = None
+    tenant_phone_snapshot: str | None = None
+    tenant_address_snapshot: str | None = None
 
 
 class AppointmentUpdate(BaseModel):
@@ -124,6 +128,9 @@ class AppointmentRead(ORMBase):
     scheduled_date: datetime
     status: AppointmentStatus
     notes: str | None = None
+    tenant_full_name_snapshot: str | None = None
+    tenant_phone_snapshot: str | None = None
+    tenant_address_snapshot: str | None = None
 
 
 class PaymentRead(ORMBase):

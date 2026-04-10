@@ -33,6 +33,8 @@ ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
 SEARCH_NEIGHBOURHOOD_STATE = "SEARCH_NEIGHBOURHOOD"
 LIST_WATER_STATE = "LIST_WATER"
+SCHEDULE_VISITOR_NAME_STATE = "SCHEDULE_VISITOR_NAME"
+SCHEDULE_VISITOR_ADDRESS_STATE = "SCHEDULE_VISITOR_ADDRESS"
 SEARCH_FLOW_STATES = {
     "SEARCH_LOCATION",
     SEARCH_NEIGHBOURHOOD_STATE,
@@ -43,6 +45,8 @@ SEARCH_FLOW_STATES = {
     "VIEW_RESULTS",
     "VIEW_PROPERTY",
     "SCHEDULE_DATE",
+    SCHEDULE_VISITOR_NAME_STATE,
+    SCHEDULE_VISITOR_ADDRESS_STATE,
     "SCHEDULE_CONFIRM",
 }
 LISTING_FLOW_STATES = {
@@ -150,7 +154,11 @@ class ChatbotConversationMixin:
         await self._send_text_and_track(phone, state, text)
 
     def _is_structured_input_state(self, state: str) -> bool:
-        return state in SEARCH_FLOW_STATES or state in LISTING_FLOW_STATES or state in ACCOUNT_FLOW_STATES or state == RESUME_PROMPT_STATE
+        return (
+            state in LISTING_FLOW_STATES
+            or state in ACCOUNT_FLOW_STATES
+            or state in {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "SCHEDULE_DATE", SCHEDULE_VISITOR_NAME_STATE, SCHEDULE_VISITOR_ADDRESS_STATE, "SCHEDULE_CONFIRM", RESUME_PROMPT_STATE}
+        )
 
     def _state_instruction_text(self, state: str, data: dict) -> str:
         prompts = {
@@ -163,6 +171,8 @@ class ChatbotConversationMixin:
             "VIEW_RESULTS": "Please reply with the number of the property you would like to view.",
             "VIEW_PROPERTY": "Tap Book Inspection whenever you are ready.",
             "SCHEDULE_DATE": "Please share your preferred inspection date and time. Example: 15/07/2026 10:00.",
+            SCHEDULE_VISITOR_NAME_STATE: "Please share your full name for the inspection record.",
+            SCHEDULE_VISITOR_ADDRESS_STATE: "Please share the address for the inspection record.",
             "SCHEDULE_CONFIRM": "Please tap Confirm when you are ready to finalize the inspection booking.",
             "LIST_TITLE": "Please share the property title.",
             "LIST_ADDRESS": "Please share the property address.",
@@ -243,21 +253,33 @@ class ChatbotConversationMixin:
             await self.send_main_menu(phone, user)
             return True
         if llm_reply.action == "search_property":
+            if self._is_structured_input_state(state):
+                logger.debug("LLM search_property action suppressed in structured state; state=%s phone=%s", state, phone)
+                return False
             if llm_reply.reply:
                 await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self._start_property_search(phone)
             return True
         if llm_reply.action == "list_property":
+            if self._is_structured_input_state(state):
+                logger.debug("LLM list_property action suppressed in structured state; state=%s phone=%s", state, phone)
+                return False
             if llm_reply.reply:
                 await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self._start_property_listing(phone, user)
             return True
         if llm_reply.action == "my_account":
+            if self._is_structured_input_state(state):
+                logger.debug("LLM my_account action suppressed in structured state; state=%s phone=%s", state, phone)
+                return False
             if llm_reply.reply:
                 await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self._open_account_service(phone, user, db)
             return True
         if llm_reply.action == "customer_service":
+            if self._is_structured_input_state(state):
+                logger.debug("LLM customer_service action suppressed in structured state; state=%s phone=%s", state, phone)
+                return False
             if llm_reply.reply:
                 await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self._open_customer_service(phone, state, data, db)
@@ -492,6 +514,10 @@ class ChatbotConversationMixin:
             await self._send_text_and_track(phone, state, "Please share your phone number so we can reach you if needed.")
         elif state == "SCHEDULE_DATE":
             await self._send_text_and_track(phone, state, "Please share your preferred inspection date and time. Example: 15/07/2026 10:00")
+        elif state == SCHEDULE_VISITOR_NAME_STATE:
+            await self._send_text_and_track(phone, state, "Please share your full name for the inspection record.")
+        elif state == SCHEDULE_VISITOR_ADDRESS_STATE:
+            await self._send_text_and_track(phone, state, "Please share the address for the inspection record.")
         elif state == ACCOUNT_MENU_STATE:
             await self._open_account_service(phone, await self._get_or_create_user(phone, db), db)
         elif state == ACCOUNT_EDIT_NAME_STATE:

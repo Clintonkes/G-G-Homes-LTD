@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from core.security import create_access_token, decode_access_token, hash_password, verify_password
-from database.models import Property, PropertyStatus, PropertyType, User, UserRole
+from database.models import Appointment, AppointmentStatus, Property, PropertyStatus, PropertyType, User, UserRole
 from services.chatbot_engine import ChatbotEngine
 from services.property_service import PropertyService
 
@@ -922,6 +922,72 @@ class TestChatbotMediaBatching:
         assert data["has_water"] is True
         assert "water" in [item.lower() for item in data["amenities"]]
         assert "send at least 3 clear photos or videos" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_schedule_booking_stores_inspection_contact_snapshots(self, db, monkeypatch, sample_property):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "SCHEDULE_DATE")
+        await engine.set_data(phone, {"selected_property_id": sample_property.id})
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        send_buttons = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_buttons", send_buttons)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="15/07/2026 10:00",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="Ada Lovelace",
+            button_id=None,
+            media_id=None,
+            message_id="msg-2",
+            db=db,
+        )
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="12 Okpara Avenue, GRA, Abakaliki",
+            button_id=None,
+            media_id=None,
+            message_id="msg-3",
+            db=db,
+        )
+        await engine.process_message(
+            phone=phone,
+            message_type="interactive",
+            text=None,
+            button_id="confirm_booking",
+            media_id=None,
+            message_id="msg-4",
+            db=db,
+        )
+
+        assert any("inspection summary" in call.args[1].lower() for call in send_buttons.await_args_list)
+        assert any("property:" in call.args[1].lower() for call in send_buttons.await_args_list)
+        assert any("name: ada lovelace" in call.args[1].lower() for call in send_buttons.await_args_list)
+        result = await db.execute(select(Appointment))
+        appointment = result.scalar_one()
+        result = await db.execute(select(User).where(User.phone_number == phone))
+        user = result.scalar_one()
+
+        assert appointment.property_id == sample_property.id
+        assert appointment.status == AppointmentStatus.confirmed
+        assert appointment.tenant_full_name_snapshot == "Ada Lovelace"
+        assert appointment.tenant_phone_snapshot == phone
+        assert appointment.tenant_address_snapshot == "12 Okpara Avenue, GRA, Abakaliki"
+        assert user.residential_address == "12 Okpara Avenue, GRA, Abakaliki"
+        assert await engine.get_state(phone) == "MAIN_MENU"
 
     @pytest.mark.asyncio
     async def test_llm_reply_is_saved_in_conversation_history(self, db, monkeypatch):
