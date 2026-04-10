@@ -25,7 +25,9 @@ def _run_alembic_upgrade() -> None:
     alembic_cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     alembic_cfg.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
     script = ScriptDirectory.from_config(alembic_cfg)
-    logger.info("Alembic script heads: %s", ", ".join(script.get_heads()))
+    heads = ", ".join(script.get_heads())
+    logger.warning("Alembic script heads: %s", heads)
+    print(f"Alembic script heads: {heads}")
 
     sync_url = make_url(settings.DATABASE_URL)
     if sync_url.drivername.endswith("+asyncpg"):
@@ -33,11 +35,15 @@ def _run_alembic_upgrade() -> None:
     engine = create_engine(sync_url)
     with engine.connect() as connection:
         context = MigrationContext.configure(connection)
-        logger.info("Alembic current revision before upgrade: %s", context.get_current_revision())
+        before_rev = context.get_current_revision()
+        logger.warning("Alembic current revision before upgrade: %s", before_rev)
+        print(f"Alembic current revision before upgrade: {before_rev}")
     command.upgrade(alembic_cfg, "head")
     with engine.connect() as connection:
         context = MigrationContext.configure(connection)
-        logger.info("Alembic current revision after upgrade: %s", context.get_current_revision())
+        after_rev = context.get_current_revision()
+        logger.warning("Alembic current revision after upgrade: %s", after_rev)
+        print(f"Alembic current revision after upgrade: {after_rev}")
 
 
 async def init_db(db: AsyncSession) -> None:
@@ -48,7 +54,8 @@ async def init_db(db: AsyncSession) -> None:
         or os.getenv("COMMIT_SHA")
         or "unknown"
     )
-    logger.info("Boot deploy reference: %s", deploy_ref)
+    logger.warning("Boot deploy reference: %s", deploy_ref)
+    print(f"Boot deploy reference: {deploy_ref}")
 
     if settings.AUTO_MIGRATE_ON_STARTUP:
         lock_key = 914201
