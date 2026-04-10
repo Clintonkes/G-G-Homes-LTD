@@ -1,7 +1,7 @@
 """Drop bathrooms from properties.
 
 Revision ID: 005_drop_bathrooms_from_properties
-Revises: 004_add_office_warehouse_types
+Revises: 004_add_office_warehouse
 Create Date: 2026-04-10 00:00:00.000000
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "005_drop_bathrooms_from_properties"
-down_revision = "004_add_office_warehouse_types"
+down_revision = "004_add_office_warehouse"
 branch_labels = None
 depends_on = None
 
