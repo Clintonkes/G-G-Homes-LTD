@@ -4,7 +4,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -25,11 +25,21 @@ def _run_alembic_upgrade() -> None:
 
 async def init_db(db: AsyncSession) -> None:
     if settings.AUTO_MIGRATE_ON_STARTUP:
+        lock_key = 914201
+        got_lock = False
         try:
-            await asyncio.to_thread(_run_alembic_upgrade)
+            result = await db.execute(text("select pg_try_advisory_lock(:key)"), {"key": lock_key})
+            got_lock = bool(result.scalar())
+            if got_lock:
+                await asyncio.to_thread(_run_alembic_upgrade)
+            else:
+                logger.info("Automatic migration skipped; another process holds advisory lock.")
         except Exception:
             logger.exception("Automatic migration failed on startup.")
             raise
+        finally:
+            if got_lock:
+                await db.execute(text("select pg_advisory_unlock(:key)"), {"key": lock_key})
 
     result = await db.execute(select(User).where(User.email == settings.ADMIN_EMAIL))
     admin = result.scalar_one_or_none()
