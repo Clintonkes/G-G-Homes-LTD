@@ -108,6 +108,31 @@ class ChatbotEngine(ChatbotConversationMixin):
             f"Price: {format_naira(prop.annual_rent)}"
         )
 
+    def _property_search_rank(self, prop: Property, state: str | None = None, location: str | None = None) -> tuple[int, float, str]:
+        normalized_state = self._normalize_text(state)
+        normalized_location = self._normalize_text(location)
+        normalized_city = self._normalize_text(prop.city)
+        normalized_neighbourhood = self._normalize_text(prop.neighbourhood)
+
+        score = 0
+        if normalized_state and normalized_state == self._normalize_text(prop.state):
+            score += 100
+        if normalized_location:
+            if normalized_location == normalized_neighbourhood:
+                score += 80
+            elif normalized_location == normalized_city:
+                score += 75
+            elif normalized_location in normalized_neighbourhood:
+                score += 60
+            elif normalized_location in normalized_city:
+                score += 55
+        if normalized_city and normalized_location and normalized_city.split()[:1] == normalized_location.split()[:1]:
+            score += 10
+        return (-score, float(prop.annual_rent or 0.0), (prop.title or "").lower())
+
+    def _rank_search_results(self, properties: list[Property], state: str | None = None, location: str | None = None) -> list[Property]:
+        return sorted(properties, key=lambda prop: self._property_search_rank(prop, state=state, location=location))
+
 
     async def _send_result_selection_prompt(self, phone: str, properties: list[Property]) -> None:
         lines = [self._property_search_result_line(index, prop) for index, prop in enumerate(properties, start=1)]
@@ -319,53 +344,128 @@ class ChatbotEngine(ChatbotConversationMixin):
         )
 
     async def _send_search_results(self, phone: str, data: dict, db: AsyncSession) -> None:
-        properties = await property_service.search(
+        max_rent = data.get("max_rent")
+        exact_properties = await property_service.search(
             db,
             state=data.get("state"),
             location=data.get("location"),
-            max_rent=data.get("max_rent"),
+            max_rent=max_rent,
             property_type=data.get("property_type"),
             bedrooms=data.get("bedrooms"),
             min_bedrooms=data.get("min_bedrooms"),
         )
-        data["result_ids"] = [prop.id for prop in properties]
-        data.pop("over_budget_result_ids", None)
-        data.pop("over_budget_max_rent", None)
-        await self.set_data(phone, data)
-        if not properties:
-            max_rent = data.get("max_rent")
-            if max_rent is not None:
-                broader_matches = await property_service.search(
+        exact_properties = self._rank_search_results(exact_properties, state=data.get("state"), location=data.get("location"))
+
+        broader_scopes = [
+            (
+                "the same state",
+                await property_service.search(
                     db,
                     state=data.get("state"),
-                    location=data.get("location"),
+                    location=None,
                     max_rent=None,
                     property_type=data.get("property_type"),
                     bedrooms=data.get("bedrooms"),
                     min_bedrooms=data.get("min_bedrooms"),
-                )
-                over_budget = [prop for prop in broader_matches if float(prop.annual_rent) > float(max_rent)]
-                if over_budget:
-                    data["over_budget_result_ids"] = [prop.id for prop in over_budget]
-                    data["over_budget_max_rent"] = max_rent
-                    await self.set_data(phone, data)
-                    await self.set_state(phone, SEARCH_HIGHER_BUDGET_OFFER_STATE)
-                    await self._send_text_and_track(
-                        phone,
-                        SEARCH_HIGHER_BUDGET_OFFER_STATE,
-                        (
-                            f"We could not find a verified {data.get('property_type', 'property').replace('_', ' ')} in "
-                            f"{data.get('location', data.get('state', 'that location'))} within {format_naira(float(max_rent))}. "
-                            f"However, we found {len(over_budget)} matching {self._pluralize(len(over_budget), 'property')} above your budget. "
-                            "Would you like to see them? Reply yes to view, or no to search with another budget."
-                        ),
-                    )
-                    return
+                ),
+            ),
+            (
+                "other verified listings of the same type",
+                await property_service.search(
+                    db,
+                    state=None,
+                    location=None,
+                    max_rent=None,
+                    property_type=data.get("property_type"),
+                    bedrooms=data.get("bedrooms"),
+                    min_bedrooms=data.get("min_bedrooms"),
+                ),
+            ),
+        ]
+        broader_scopes = [
+            (scope_label, self._rank_search_results(scope_properties, state=data.get("state"), location=data.get("location")))
+            for scope_label, scope_properties in broader_scopes
+        ]
+        data["result_ids"] = [prop.id for prop in exact_properties]
+        data.pop("over_budget_result_ids", None)
+        data.pop("over_budget_max_rent", None)
+        await self.set_data(phone, data)
+        if exact_properties:
             await self.set_state(phone, "VIEW_RESULTS")
-            await self._send_text_and_track(phone, "VIEW_RESULTS", "We could not find a verified listing that matches that search just now. If you would like, we can help you refine the location, adjust your budget, or start a fresh search immediately.")
+            await self._send_result_selection_prompt(phone, exact_properties)
             return
+
+        if max_rent is not None:
+            best_affordable: tuple[str, list[Property]] | None = None
+            best_over_budget: tuple[str, list[Property]] | None = None
+
+            for scope_label, scoped_properties in broader_scopes:
+                if not scoped_properties:
+                    continue
+                affordable = [prop for prop in scoped_properties if float(prop.annual_rent) <= float(max_rent)]
+                if affordable and best_affordable is None:
+                    best_affordable = (scope_label, affordable)
+                over_budget = [prop for prop in scoped_properties if float(prop.annual_rent) > float(max_rent)]
+                if over_budget and best_over_budget is None:
+                    best_over_budget = (scope_label, over_budget)
+
+            if best_affordable:
+                scope_label, affordable = best_affordable
+                affordable = self._rank_search_results(affordable, state=data.get("state"), location=data.get("location"))
+                data["result_ids"] = [prop.id for prop in affordable]
+                await self.set_data(phone, data)
+                await self.set_state(phone, "VIEW_RESULTS")
+                await self._send_text_and_track(
+                    phone,
+                    "VIEW_RESULTS",
+                    (
+                        f"We could not find a verified {data.get('property_type', 'property').replace('_', ' ')} in "
+                        f"{data.get('location', data.get('state', 'that location'))} within your exact location, "
+                        f"but we found {len(affordable)} verified {self._pluralize(len(affordable), 'property')} in {scope_label} that fit your budget."
+                    ),
+                )
+                await self._send_result_selection_prompt(phone, affordable)
+                return
+
+            if best_over_budget:
+                scope_label, over_budget = best_over_budget
+                over_budget = self._rank_search_results(over_budget, state=data.get("state"), location=data.get("location"))
+                data["over_budget_result_ids"] = [prop.id for prop in over_budget]
+                data["over_budget_max_rent"] = max_rent
+                await self.set_data(phone, data)
+                await self.set_state(phone, SEARCH_HIGHER_BUDGET_OFFER_STATE)
+                cheapest = min(float(prop.annual_rent) for prop in over_budget)
+                budget_phrase = (
+                    f"your budget of {format_naira(float(max_rent))} is lower than the verified {data.get('property_type', 'property').replace('_', ' ')} options we found"
+                    if cheapest > float(max_rent)
+                    else "we found verified alternatives"
+                )
+                await self._send_text_and_track(
+                    phone,
+                    SEARCH_HIGHER_BUDGET_OFFER_STATE,
+                    (
+                        f"We could not find a verified {data.get('property_type', 'property').replace('_', ' ')} in "
+                        f"{data.get('location', data.get('state', 'that location'))} within {format_naira(float(max_rent))}. "
+                        f"{budget_phrase} in {scope_label}. "
+                        f"We found {len(over_budget)} matching {self._pluralize(len(over_budget), 'property')} above your budget. "
+                        "Would you like to see them? Reply yes to view, or no to search with another budget."
+                    ),
+                )
+                return
+
         await self.set_state(phone, "VIEW_RESULTS")
-        await self._send_result_selection_prompt(phone, properties)
+        if max_rent is not None:
+            await self._send_text_and_track(
+                phone,
+                "VIEW_RESULTS",
+                (
+                    f"We could not find a verified {data.get('property_type', 'property').replace('_', ' ')} in "
+                    f"{data.get('location', data.get('state', 'that location'))} within {format_naira(float(max_rent))}. "
+                    "We could not find a verified alternative in the same state either. If you would like, we can help you refine the location, adjust your budget, or start a fresh search immediately."
+                ),
+            )
+            return
+        await self._send_text_and_track(phone, "VIEW_RESULTS", "We could not find a verified listing that matches that search just now. If you would like, we can help you refine the location, adjust your budget, or start a fresh search immediately.")
 
     async def send_main_menu(self, phone: str, user: User) -> None:
         await self.set_state(phone, "MAIN_MENU")

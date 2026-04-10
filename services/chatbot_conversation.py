@@ -33,6 +33,37 @@ ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
 SEARCH_NEIGHBOURHOOD_STATE = "SEARCH_NEIGHBOURHOOD"
 LIST_WATER_STATE = "LIST_WATER"
+SEARCH_FLOW_STATES = {
+    "SEARCH_LOCATION",
+    SEARCH_NEIGHBOURHOOD_STATE,
+    "SEARCH_BUDGET",
+    "SEARCH_TYPE",
+    "SEARCH_BEDROOMS",
+    SEARCH_HIGHER_BUDGET_OFFER_STATE,
+    "VIEW_RESULTS",
+    "VIEW_PROPERTY",
+    "SCHEDULE_DATE",
+    "SCHEDULE_CONFIRM",
+}
+LISTING_FLOW_STATES = {
+    "LIST_TITLE",
+    "LIST_ADDRESS",
+    "LIST_NEIGHBOURHOOD",
+    "LIST_CITY",
+    "LIST_STATE",
+    "LIST_TYPE",
+    "LIST_BEDROOMS",
+    "LIST_BEDROOMS_CUSTOM",
+    "LIST_RENT",
+    "LIST_AMENITIES",
+    LIST_WATER_STATE,
+    "LIST_PHOTOS",
+    "LIST_DOCUMENTS",
+    "LIST_LEGAL_REP",
+    "LIST_USER_NAME",
+    "LIST_USER_PHONE",
+}
+ACCOUNT_FLOW_STATES = {"ACCOUNT_MENU", "ACCOUNT_EDIT_NAME", "ACCOUNT_EDIT_EMAIL"}
 
 
 class ChatbotConversationMixin:
@@ -118,6 +149,9 @@ class ChatbotConversationMixin:
             return
         await self._send_text_and_track(phone, state, text)
 
+    def _is_structured_input_state(self, state: str) -> bool:
+        return state in SEARCH_FLOW_STATES or state in LISTING_FLOW_STATES or state in ACCOUNT_FLOW_STATES or state == RESUME_PROMPT_STATE
+
     def _state_instruction_text(self, state: str, data: dict) -> str:
         prompts = {
             "SEARCH_LOCATION": "Please tell us the state where you want to search for a property.",
@@ -197,31 +231,43 @@ class ChatbotConversationMixin:
             bool(llm_reply.reply),
         )
 
-        if llm_reply.reply:
-            await self._emit_llm_reply(phone, state, llm_reply.reply)
-
         if llm_reply.action == "restart":
+            if llm_reply.reply:
+                await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self.reset_conversation(phone, clear_recent_context=True)
             await self.send_main_menu(phone, user)
             return True
         if llm_reply.action == "switch_service":
+            if llm_reply.reply:
+                await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self.send_main_menu(phone, user)
             return True
         if llm_reply.action == "search_property":
+            if llm_reply.reply:
+                await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self._start_property_search(phone)
             return True
         if llm_reply.action == "list_property":
+            if llm_reply.reply:
+                await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self._start_property_listing(phone, user)
             return True
         if llm_reply.action == "my_account":
+            if llm_reply.reply:
+                await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self._open_account_service(phone, user, db)
             return True
         if llm_reply.action == "customer_service":
+            if llm_reply.reply:
+                await self._emit_llm_reply(phone, state, llm_reply.reply)
             await self._open_customer_service(phone, state, data, db)
             return True
 
-        if llm_reply.reply:
+        if llm_reply.reply and not self._is_structured_input_state(state):
+            await self._emit_llm_reply(phone, state, llm_reply.reply)
             return True
+        if llm_reply.reply:
+            logger.debug("LLM reply suppressed in structured state; state=%s phone=%s", state, phone)
         logger.debug("LLM reply had no text or routing action; state=%s phone=%s", state, phone)
         return False
 

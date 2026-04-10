@@ -80,6 +80,113 @@ class TestPropertyService:
         assert any(p.id == prop.id for p in results)
 
     @pytest.mark.asyncio
+    async def test_search_falls_back_to_same_state_alternatives_when_location_misses(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "SEARCH_TYPE")
+        await engine.set_data(
+            phone,
+            {
+                "state": "Ebonyi",
+                "location": "Wrong Area",
+                "max_rent": 300000.0,
+                "property_type": "flat",
+                "bedrooms": 3,
+            },
+        )
+
+        landlord = User(full_name="Landlord Three", phone_number="2348077777777", role=UserRole.landlord)
+        db.add(landlord)
+        await db.flush()
+        prop = Property(
+            landlord_id=landlord.id,
+            title="Budget Flat",
+            address="22 Market Road",
+            neighbourhood="GRA",
+            city="Abakaliki",
+            state="Ebonyi",
+            property_type=PropertyType.flat,
+            bedrooms=3,
+            annual_rent=250000,
+            status=PropertyStatus.active,
+            is_verified=True,
+        )
+        db.add(prop)
+        await db.commit()
+        await db.refresh(prop)
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", AsyncMock(return_value=True))
+
+        await engine._send_search_results(phone, await engine.get_data(phone), db)
+
+        assert await engine.get_state(phone) == "VIEW_RESULTS"
+        assert send_text.await_count >= 1
+        assert "same state" in send_text.await_args_list[0].args[1].lower()
+        saved = await engine.get_data(phone)
+        assert saved["result_ids"] == [prop.id]
+
+    @pytest.mark.asyncio
+    async def test_search_ranks_closest_matches_before_cheaper_fallbacks(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "SEARCH_TYPE")
+        await engine.set_data(
+            phone,
+            {
+                "state": "Ebonyi",
+                "location": "Abakaliki",
+                "max_rent": 100000.0,
+                "property_type": "flat",
+                "bedrooms": 3,
+            },
+        )
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        exact_location = SimpleNamespace(
+            id=1,
+            title="Exact Match Flat",
+            city="Abakaliki",
+            state="Ebonyi",
+            address="1 First Street",
+            neighbourhood="GRA",
+            annual_rent=250000.0,
+        )
+        same_city = SimpleNamespace(
+            id=2,
+            title="Same City Flat",
+            city="Abakaliki North",
+            state="Ebonyi",
+            address="2 Second Street",
+            neighbourhood="Azugwu",
+            annual_rent=150000.0,
+        )
+        cheaper_but_further = SimpleNamespace(
+            id=3,
+            title="Cheapest Flat",
+            city="Afikpo",
+            state="Ebonyi",
+            address="3 Third Street",
+            neighbourhood="Central",
+            annual_rent=120000.0,
+        )
+        monkeypatch.setattr(
+            "services.chatbot_engine.property_service.search",
+            AsyncMock(side_effect=[[], [exact_location, same_city, cheaper_but_further], []]),
+        )
+
+        await engine._send_search_results(phone, await engine.get_data(phone), db)
+
+        saved = await engine.get_data(phone)
+        assert saved["over_budget_result_ids"] == [1, 2, 3]
+        assert "above your budget" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
     async def test_search_filters_by_max_rent(self, db, sample_property):
         included = await PropertyService().search(db=db, max_rent=300000)
         excluded = await PropertyService().search(db=db, max_rent=100000)
@@ -147,7 +254,7 @@ class TestChatbotMediaBatching:
         )
         monkeypatch.setattr(
             "services.chatbot_engine.property_service.search",
-            AsyncMock(side_effect=[[], [over_budget_prop]]),
+            AsyncMock(side_effect=[[], [], [over_budget_prop]]),
         )
 
         await engine._send_search_results(phone, await engine.get_data(phone), db)
@@ -155,6 +262,7 @@ class TestChatbotMediaBatching:
         assert await engine.get_state(phone) == "SEARCH_HIGHER_BUDGET_OFFER"
         saved = await engine.get_data(phone)
         assert saved["over_budget_result_ids"] == [77]
+        assert "budget of" in send_text.await_args.args[1].lower()
         assert "above your budget" in send_text.await_args.args[1].lower()
 
     @pytest.mark.asyncio
@@ -724,6 +832,45 @@ class TestChatbotMediaBatching:
         assert send_text.await_count == 2
         assert "start a fresh search" in send_text.await_args_list[0].args[1].lower()
         assert "which state" in send_text.await_args_list[1].args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_structured_search_step_suppresses_non_routing_llm_reply(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        await engine.set_state(phone, "SEARCH_LOCATION")
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="continue", confidence=0.9, source="llm")),
+        )
+        monkeypatch.setattr(
+            "services.chatbot_engine.conversation_service.generate_reply",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    reply="I can help with that.",
+                    action="none",
+                    confidence=0.7,
+                    source="llm",
+                )
+            ),
+        )
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="Ebonyi",
+            button_id=None,
+            media_id=None,
+            message_id="msg-1",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "SEARCH_NEIGHBOURHOOD"
+        assert send_text.await_count == 1
+        assert "neighbourhood, area, or city" in send_text.await_args.args[1].lower()
 
     @pytest.mark.asyncio
     async def test_list_amenities_prompts_water_before_photos(self, db, monkeypatch):
