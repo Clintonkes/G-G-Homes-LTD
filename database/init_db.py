@@ -4,7 +4,8 @@ import asyncio
 import logging
 from pathlib import Path
 
-from sqlalchemy import select, text
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -17,10 +18,25 @@ logger = logging.getLogger(__name__)
 def _run_alembic_upgrade() -> None:
     from alembic import command
     from alembic.config import Config
+    from alembic.runtime.migration import MigrationContext
+    from alembic.script import ScriptDirectory
 
     alembic_cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     alembic_cfg.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+    script = ScriptDirectory.from_config(alembic_cfg)
+    logger.info("Alembic script heads: %s", ", ".join(script.get_heads()))
+
+    sync_url = make_url(settings.DATABASE_URL)
+    if sync_url.drivername.endswith("+asyncpg"):
+        sync_url = sync_url.set(drivername=sync_url.drivername.replace("+asyncpg", ""))
+    engine = create_engine(sync_url)
+    with engine.connect() as connection:
+        context = MigrationContext.configure(connection)
+        logger.info("Alembic current revision before upgrade: %s", context.get_current_revision())
     command.upgrade(alembic_cfg, "head")
+    with engine.connect() as connection:
+        context = MigrationContext.configure(connection)
+        logger.info("Alembic current revision after upgrade: %s", context.get_current_revision())
 
 
 async def init_db(db: AsyncSession) -> None:
