@@ -144,7 +144,6 @@ class Property(Base):
     # Property features and pricing attributes
     property_type: Mapped[PropertyType] = mapped_column(Enum(PropertyType))
     bedrooms: Mapped[int] = mapped_column(Integer, default=1)
-    bathrooms: Mapped[int] = mapped_column(Integer, default=1)
     amenities: Mapped[list[str]] = mapped_column(JSON, default=list)
     has_water: Mapped[bool] = mapped_column(Boolean, default=False)
     has_electricity: Mapped[bool] = mapped_column(Boolean, default=False)

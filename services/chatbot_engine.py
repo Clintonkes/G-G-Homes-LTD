@@ -35,8 +35,8 @@ ACCOUNT_MENU_STATE = "ACCOUNT_MENU"
 ACCOUNT_EDIT_NAME_STATE = "ACCOUNT_EDIT_NAME"
 ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
-SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
-LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE"}
+SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
+LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_WATER", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE"}
 ACCOUNT_FLOW_STATES = {ACCOUNT_MENU_STATE, ACCOUNT_EDIT_NAME_STATE, ACCOUNT_EDIT_EMAIL_STATE}
 LLM_ROUTING_ACTIONS = {"restart", "switch_service", "search_property", "list_property", "my_account", "customer_service"}
 
@@ -260,13 +260,15 @@ class ChatbotEngine(ChatbotConversationMixin):
     async def _start_property_search(self, phone: str) -> None:
         await self.clear_session(phone)
         await self.set_state(phone, "SEARCH_LOCATION")
-        await self._send_text_and_track(phone, "SEARCH_LOCATION", "Certainly. Which neighbourhood, area, or location would you like us to search for?")
+        await self._send_text_and_track(phone, "SEARCH_LOCATION", "Certainly. Which state would you like us to search in?")
+
 
     async def _start_property_listing(self, phone: str, user: User) -> None:
         await self.clear_session(phone)
         await self.set_state(phone, "LIST_TITLE")
         await self.set_data(phone, {"landlord_id": user.id})
         await self._send_text_and_track(phone, "LIST_TITLE", "Absolutely. Let us get your property listed. Please share the property title you would like us to use.")
+
 
     async def _send_search_budget_options(self, phone: str) -> None:
         await whatsapp.send_list(
@@ -319,7 +321,8 @@ class ChatbotEngine(ChatbotConversationMixin):
     async def _send_search_results(self, phone: str, data: dict, db: AsyncSession) -> None:
         properties = await property_service.search(
             db,
-            neighbourhood=data.get("neighbourhood"),
+            state=data.get("state"),
+            location=data.get("location"),
             max_rent=data.get("max_rent"),
             property_type=data.get("property_type"),
             bedrooms=data.get("bedrooms"),
@@ -334,7 +337,8 @@ class ChatbotEngine(ChatbotConversationMixin):
             if max_rent is not None:
                 broader_matches = await property_service.search(
                     db,
-                    neighbourhood=data.get("neighbourhood"),
+                    state=data.get("state"),
+                    location=data.get("location"),
                     max_rent=None,
                     property_type=data.get("property_type"),
                     bedrooms=data.get("bedrooms"),
@@ -351,14 +355,14 @@ class ChatbotEngine(ChatbotConversationMixin):
                         SEARCH_HIGHER_BUDGET_OFFER_STATE,
                         (
                             f"We could not find a verified {data.get('property_type', 'property').replace('_', ' ')} in "
-                            f"{data.get('neighbourhood', 'that location')} within {format_naira(float(max_rent))}. "
+                            f"{data.get('location', data.get('state', 'that location'))} within {format_naira(float(max_rent))}. "
                             f"However, we found {len(over_budget)} matching {self._pluralize(len(over_budget), 'property')} above your budget. "
                             "Would you like to see them? Reply yes to view, or no to search with another budget."
                         ),
                     )
                     return
             await self.set_state(phone, "VIEW_RESULTS")
-            await self._send_text_and_track(phone, "VIEW_RESULTS", "We could not find a verified listing that matches that search just now. If you would like, we can help you start a fresh search immediately.")
+            await self._send_text_and_track(phone, "VIEW_RESULTS", "We could not find a verified listing that matches that search just now. If you would like, we can help you refine the location, adjust your budget, or start a fresh search immediately.")
             return
         await self.set_state(phone, "VIEW_RESULTS")
         await self._send_result_selection_prompt(phone, properties)
@@ -505,6 +509,7 @@ class ChatbotEngine(ChatbotConversationMixin):
         handler_map = {
             "MAIN_MENU": self.handle_main_menu,
             "SEARCH_LOCATION": self.handle_search_location,
+            "SEARCH_NEIGHBOURHOOD": self.handle_search_neighbourhood,
             "SEARCH_BUDGET": self.handle_search_budget,
             "SEARCH_TYPE": self.handle_search_type,
             "SEARCH_BEDROOMS": self.handle_search_bedrooms,
@@ -528,6 +533,7 @@ class ChatbotEngine(ChatbotConversationMixin):
             LIST_BEDROOMS_CUSTOM_STATE: self.handle_list_bedrooms_custom,
             "LIST_RENT": self.handle_list_rent,
             "LIST_AMENITIES": self.handle_list_amenities,
+            "LIST_WATER": self.handle_list_water,
             "LIST_PHOTOS": self.handle_list_photos,
             "LIST_DOCUMENTS": self.handle_list_documents,
             "LIST_LEGAL_REP": self.handle_list_legal_rep,
@@ -815,7 +821,15 @@ class ChatbotEngine(ChatbotConversationMixin):
 
     async def handle_search_location(self, phone, input_value, *_args, **kwargs):
         data = await self.get_data(phone)
-        data["neighbourhood"] = input_value
+        data["state"] = input_value
+        await self.set_data(phone, data)
+        await self.set_state(phone, "SEARCH_NEIGHBOURHOOD")
+        await self._send_text_and_track(phone, "SEARCH_NEIGHBOURHOOD", "Please share the neighbourhood, area, or city you want us to search within.")
+
+
+    async def handle_search_neighbourhood(self, phone, input_value, *_args, **kwargs):
+        data = await self.get_data(phone)
+        data["location"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "SEARCH_BUDGET")
         await self._send_search_budget_options(phone)
@@ -1102,6 +1116,46 @@ class ChatbotEngine(ChatbotConversationMixin):
         data["amenities"] = [item.strip() for item in input_value.split(",") if item.strip()]
         data["photo_urls"] = []
         data["video_urls"] = []
+        await self.set_data(phone, data)
+        await self.set_state(phone, "LIST_WATER")
+        await whatsapp.send_buttons(
+            phone,
+            "Does the property have water?",
+            [
+                {"id": "water_yes", "title": "Yes"},
+                {"id": "water_no", "title": "No"},
+            ],
+        )
+
+
+    async def handle_list_water(self, phone, input_value, *_args, **kwargs):
+        intent = kwargs.get("intent") or (await intent_service.detect_intent(input_value, "LIST_WATER")).intent
+        normalized = self._normalize_text(input_value)
+        if intent == "clarification":
+            await whatsapp.send_text(phone, "Please reply yes if the property has water, or no if it does not.")
+            return
+        if input_value == "water_yes" or normalized in {"yes", "y", "yeah", "yep", "true"}:
+            has_water = True
+        elif input_value == "water_no" or normalized in {"no", "n", "nope", "false"}:
+            has_water = False
+        else:
+            await whatsapp.send_buttons(
+                phone,
+                "Please confirm whether the property has water.",
+                [
+                    {"id": "water_yes", "title": "Yes"},
+                    {"id": "water_no", "title": "No"},
+                ],
+            )
+            return
+        data = await self.get_data(phone)
+        data["has_water"] = has_water
+        amenities = data.get("amenities", [])
+        normalized_amenities = [item.lower() for item in amenities]
+        if has_water and "water" not in normalized_amenities:
+            data["amenities"] = amenities + ["water"]
+        if not has_water and "water" in normalized_amenities:
+            data["amenities"] = [item for item in amenities if item.lower() != "water"]
         await self.set_data(phone, data)
         await self.set_state(phone, "LIST_PHOTOS")
         await whatsapp.send_text(phone, "You can now send property photos or videos. Please send at least 3 clear photos or videos of the property. When you are done, simply say done and we will proceed.")

@@ -23,7 +23,7 @@ ALLOWED_INTENTS = {
     "goodbye",
     "unknown",
 }
-SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
+SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {
     "LIST_TITLE",
     "LIST_ADDRESS",
@@ -35,6 +35,7 @@ LISTING_FLOW_STATES = {
     "LIST_BEDROOMS_CUSTOM",
     "LIST_RENT",
     "LIST_AMENITIES",
+    "LIST_WATER",
     "LIST_PHOTOS",
     "LIST_DOCUMENTS",
     "LIST_LEGAL_REP",
@@ -68,12 +69,14 @@ class IntentService:
             "LIST_BEDROOMS_CUSTOM": "expects exact bedroom count as number",
             "LIST_RENT": "expects annual rent amount",
             "LIST_AMENITIES": "expects comma-separated amenities",
+            "LIST_WATER": "expects yes or no about water availability",
             "LIST_PHOTOS": "expects images or videos",
             "LIST_DOCUMENTS": "expects ownership document files",
             "LIST_LEGAL_REP": "expects legal representative phone number",
             "LIST_USER_NAME": "expects landlord full name",
             "LIST_USER_PHONE": "expects landlord phone number",
-            "SEARCH_LOCATION": "expects desired location text",
+            "SEARCH_LOCATION": "expects the state to search in",
+            "SEARCH_NEIGHBOURHOOD": "expects neighbourhood, area, or city text",
             "SEARCH_BUDGET": "expects budget choice or budget amount",
             "SEARCH_TYPE": "expects preferred property type",
             "SEARCH_BEDROOMS": "expects preferred bedroom count",

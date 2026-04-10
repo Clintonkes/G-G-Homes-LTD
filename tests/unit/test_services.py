@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from core.security import create_access_token, decode_access_token, hash_password, verify_password
-from database.models import User, UserRole
+from database.models import Property, PropertyStatus, PropertyType, User, UserRole
 from services.chatbot_engine import ChatbotEngine
 from services.property_service import PropertyService
 
@@ -54,6 +54,30 @@ class TestPropertyService:
     async def test_search_by_neighbourhood_case_insensitive(self, db, sample_property):
         results = await PropertyService().search(db=db, neighbourhood="GRA")
         assert any(p.id == sample_property.id for p in results)
+
+    @pytest.mark.asyncio
+    async def test_search_filters_by_state_and_city(self, db):
+        landlord = User(full_name="Landlord Two", phone_number="2348099999999", role=UserRole.landlord)
+        db.add(landlord)
+        await db.flush()
+        prop = Property(
+            landlord_id=landlord.id,
+            title="Executive Office",
+            address="9 Broad Street",
+            neighbourhood="Central",
+            city="Abakaliki",
+            state="Ebonyi",
+            property_type=PropertyType.office_space,
+            annual_rent=1000000,
+            status=PropertyStatus.active,
+            is_verified=True,
+        )
+        db.add(prop)
+        await db.commit()
+        await db.refresh(prop)
+
+        results = await PropertyService().search(db=db, state="Ebonyi", location="Abakaliki")
+        assert any(p.id == prop.id for p in results)
 
     @pytest.mark.asyncio
     async def test_search_filters_by_max_rent(self, db, sample_property):
@@ -239,7 +263,7 @@ class TestChatbotMediaBatching:
 
         assert await engine.get_state(phone) == "SEARCH_LOCATION"
         assert send_text.await_count == 1
-        assert "which neighbourhood" in send_text.await_args.args[1].lower()
+        assert "which state" in send_text.await_args.args[1].lower()
 
     @pytest.mark.asyncio
     async def test_main_menu_account_button_opens_account_menu(self, db, monkeypatch):
@@ -657,7 +681,7 @@ class TestChatbotMediaBatching:
 
         assert await engine.get_state(phone) == "SEARCH_LOCATION"
         assert send_text.await_count == 1
-        assert "which neighbourhood" in send_text.await_args.args[1].lower()
+        assert "which state" in send_text.await_args.args[1].lower()
 
     @pytest.mark.asyncio
     async def test_view_results_free_text_uses_llm_reply_to_route(self, db, monkeypatch):
@@ -699,7 +723,58 @@ class TestChatbotMediaBatching:
         assert await engine.get_state(phone) == "SEARCH_LOCATION"
         assert send_text.await_count == 2
         assert "start a fresh search" in send_text.await_args_list[0].args[1].lower()
-        assert "which neighbourhood" in send_text.await_args_list[1].args[1].lower()
+        assert "which state" in send_text.await_args_list[1].args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_list_amenities_prompts_water_before_photos(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "LIST_AMENITIES")
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_buttons = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_buttons", send_buttons)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="continue", confidence=0.95, source="llm")),
+        )
+
+        await engine.handle_list_amenities(
+            phone=phone,
+            input_value="fenced compound, prepaid meter",
+        )
+
+        assert await engine.get_state(phone) == "LIST_WATER"
+        assert send_buttons.await_count == 1
+        assert "does the property have water" in send_buttons.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_list_water_yes_moves_to_photos(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "LIST_WATER")
+        await engine.set_data(phone, {"amenities": ["fenced compound"]})
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_buttons", AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="continue", confidence=0.95, source="llm")),
+        )
+
+        await engine.handle_list_water(
+            phone=phone,
+            input_value="yes",
+        )
+
+        assert await engine.get_state(phone) == "LIST_PHOTOS"
+        data = await engine.get_data(phone)
+        assert data["has_water"] is True
+        assert "water" in [item.lower() for item in data["amenities"]]
+        assert "send at least 3 clear photos or videos" in send_text.await_args.args[1].lower()
 
     @pytest.mark.asyncio
     async def test_llm_reply_is_saved_in_conversation_history(self, db, monkeypatch):

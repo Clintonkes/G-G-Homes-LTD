@@ -63,7 +63,6 @@ class PropertyCreate(BaseModel):
     city: str = "Abakaliki"
     property_type: PropertyType
     bedrooms: int = 1
-    bathrooms: int = 1
     amenities: list[str] = Field(default_factory=list)
     has_water: bool = False
     has_electricity: bool = False
@@ -88,7 +87,6 @@ class PropertyRead(ORMBase):
     city: str
     property_type: PropertyType
     bedrooms: int
-    bathrooms: int
     amenities: list[str]
     has_water: bool
     has_electricity: bool

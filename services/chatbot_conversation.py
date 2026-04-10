@@ -31,6 +31,8 @@ ACCOUNT_MENU_STATE = "ACCOUNT_MENU"
 ACCOUNT_EDIT_NAME_STATE = "ACCOUNT_EDIT_NAME"
 ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
+SEARCH_NEIGHBOURHOOD_STATE = "SEARCH_NEIGHBOURHOOD"
+LIST_WATER_STATE = "LIST_WATER"
 
 
 class ChatbotConversationMixin:
@@ -118,7 +120,8 @@ class ChatbotConversationMixin:
 
     def _state_instruction_text(self, state: str, data: dict) -> str:
         prompts = {
-            "SEARCH_LOCATION": "Please tell us the neighbourhood, area, or location you want to search.",
+            "SEARCH_LOCATION": "Please tell us the state where you want to search for a property.",
+            SEARCH_NEIGHBOURHOOD_STATE: "Please tell us the neighbourhood, area, or city you want us to search within.",
             "SEARCH_BUDGET": "Please choose the budget range you would like us to work with.",
             "SEARCH_TYPE": "Please select the property type you prefer.",
             "SEARCH_BEDROOMS": "Please choose the bedroom option that matches what you want.",
@@ -136,6 +139,7 @@ class ChatbotConversationMixin:
             "LIST_BEDROOMS": "Please choose the bedroom count for this property.",
             "LIST_RENT": "Please enter the annual rent amount in naira.",
             "LIST_AMENITIES": "Please list the amenities, separated by commas.",
+            LIST_WATER_STATE: "Please tell us whether the property has water. Reply yes or no.",
             "LIST_PHOTOS": "Please send at least 3 clear property photos or videos before we continue.",
             "LIST_DOCUMENTS": "Please upload the ownership documents for this property and reply with done when you finish.",
             "LIST_LEGAL_REP": "Please share the phone number of a legal representative for this listing.",
@@ -375,7 +379,9 @@ class ChatbotConversationMixin:
 
     async def _prompt_for_state(self, phone: str, state: str, data: dict, db: AsyncSession) -> None:
         if state == "SEARCH_LOCATION":
-            await self._send_text_and_track(phone, state, "We are continuing your property search. Which neighbourhood, area, or location would you like us to search for?")
+            await self._send_text_and_track(phone, state, "We are continuing your property search. Which state would you like us to search in?")
+        elif state == SEARCH_NEIGHBOURHOOD_STATE:
+            await self._send_text_and_track(phone, state, "Please share the neighbourhood, area, or city you want us to search within.")
         elif state == "SEARCH_BUDGET":
             await self._send_search_budget_options(phone)
         elif state == "SEARCH_TYPE":
@@ -426,6 +432,8 @@ class ChatbotConversationMixin:
             await self._send_text_and_track(phone, state, "Please enter the annual rent amount in naira. You can write it as 500000 or 500,000.")
         elif state == "LIST_AMENITIES":
             await self._send_text_and_track(phone, state, "Please list the amenities, separated by commas.")
+        elif state == LIST_WATER_STATE:
+            await self._send_text_and_track(phone, state, "Does the property have water? Please reply yes or no.")
         elif state == "LIST_PHOTOS":
             await self._send_text_and_track(phone, state, "You can now send property photos or videos. Please send at least 3 clear photos or videos of the property. When you are done, simply say done and we will proceed.")
         elif state == "LIST_DOCUMENTS":

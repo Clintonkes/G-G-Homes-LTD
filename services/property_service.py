@@ -10,6 +10,8 @@ class PropertyService:
     async def search(
         self,
         db: AsyncSession,
+        state: str | None = None,
+        location: str | None = None,
         neighbourhood: str | None = None,
         max_rent: float | None = None,
         property_type: str | None = None,
@@ -20,8 +22,14 @@ class PropertyService:
             Property.status == PropertyStatus.active,
             Property.is_verified.is_(True),
         )
-        if neighbourhood:
-            stmt = stmt.where(Property.neighbourhood.ilike(neighbourhood))
+        if state:
+            stmt = stmt.where(Property.state.ilike(f"%{state.strip()}%"))
+        search_term = location or neighbourhood
+        if search_term:
+            pattern = f"%{search_term.strip()}%"
+            stmt = stmt.where(
+                (Property.neighbourhood.ilike(pattern)) | (Property.city.ilike(pattern))
+            )
         if max_rent is not None:
             stmt = stmt.where(Property.annual_rent <= max_rent)
         if property_type:
