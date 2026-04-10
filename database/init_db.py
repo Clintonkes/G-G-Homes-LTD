@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, select, text
@@ -40,6 +41,15 @@ def _run_alembic_upgrade() -> None:
 
 
 async def init_db(db: AsyncSession) -> None:
+    deploy_ref = (
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("RAILWAY_DEPLOYMENT_ID")
+        or os.getenv("RENDER_GIT_COMMIT")
+        or os.getenv("COMMIT_SHA")
+        or "unknown"
+    )
+    logger.info("Boot deploy reference: %s", deploy_ref)
+
     if settings.AUTO_MIGRATE_ON_STARTUP:
         lock_key = 914201
         got_lock = False
