@@ -35,10 +35,11 @@ ACCOUNT_MENU_STATE = "ACCOUNT_MENU"
 ACCOUNT_EDIT_NAME_STATE = "ACCOUNT_EDIT_NAME"
 ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
-SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
+SEARCH_BUDGET_AMOUNT_STATE = "SEARCH_BUDGET_AMOUNT"
+SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", SEARCH_BUDGET_AMOUNT_STATE, "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_WATER", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE"}
 ACCOUNT_FLOW_STATES = {ACCOUNT_MENU_STATE, ACCOUNT_EDIT_NAME_STATE, ACCOUNT_EDIT_EMAIL_STATE}
-STRICT_INTERRUPT_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_WATER", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
+STRICT_INTERRUPT_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", SEARCH_BUDGET_AMOUNT_STATE, "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_WATER", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
 LLM_ROUTING_ACTIONS = {"restart", "switch_service", "search_property", "list_property", "my_account", "customer_service"}
 
 
@@ -58,6 +59,9 @@ class ChatbotEngine(ChatbotConversationMixin):
 
     def _resume_key(self, phone: str) -> str:
         return f"{RESUME_KEY_PREFIX}{phone}"
+
+    def _processed_message_key(self, message_id: str) -> str:
+        return f"processed_message:{message_id}"
 
     def _normalize_text(self, value: str | None) -> str:
         return (value or "").strip().lower()
@@ -286,7 +290,7 @@ class ChatbotEngine(ChatbotConversationMixin):
     async def _start_property_search(self, phone: str) -> None:
         await self.clear_session(phone)
         await self.set_state(phone, "SEARCH_LOCATION")
-        await self._send_text_and_track(phone, "SEARCH_LOCATION", "Certainly. Which state would you like us to search in?")
+        await self._send_prompt_once(phone, "SEARCH_LOCATION", "Certainly. Which state would you like us to search in?")
 
 
     async def _start_property_listing(self, phone: str, user: User) -> None:
@@ -299,7 +303,7 @@ class ChatbotEngine(ChatbotConversationMixin):
     async def _send_search_budget_options(self, phone: str) -> None:
         await whatsapp.send_list(
             phone,
-            "Thank you. Please choose the budget range you would like us to work with.",
+            "Thank you. Please choose the budget range you would like us to work with, and we will ask for the exact amount after that.",
             "Choose Budget",
             [{
                 "title": "Budget Range",
@@ -307,7 +311,7 @@ class ChatbotEngine(ChatbotConversationMixin):
                     {"id": "budget_100000", "title": "Up to 100k"},
                     {"id": "budget_250000", "title": "Up to 250k"},
                     {"id": "budget_500000", "title": "Up to 500k"},
-                    {"id": "budget_flexible", "title": "More than 500k"},
+                    {"id": "budget_more_than_500000", "title": "More than 500k"},
                 ],
             }],
         )
@@ -513,6 +517,10 @@ class ChatbotEngine(ChatbotConversationMixin):
     ) -> None:
         read_ids = [mid for mid in (message_ids or [message_id]) if mid]
         for mid in read_ids:
+            if await self.redis.get(self._processed_message_key(mid)):
+                return
+        for mid in read_ids:
+            await self.redis.set(self._processed_message_key(mid), "1", ex=settings.REDIS_RESUME_TTL_SECONDS)
             await whatsapp.mark_as_read(mid)
         user = await self._get_or_create_user(phone, db)
         phone = format_phone_number(phone)
@@ -612,6 +620,7 @@ class ChatbotEngine(ChatbotConversationMixin):
             "SEARCH_LOCATION": self.handle_search_location,
             "SEARCH_NEIGHBOURHOOD": self.handle_search_neighbourhood,
             "SEARCH_BUDGET": self.handle_search_budget,
+            SEARCH_BUDGET_AMOUNT_STATE: self.handle_search_budget_amount,
             "SEARCH_TYPE": self.handle_search_type,
             "SEARCH_BEDROOMS": self.handle_search_bedrooms,
             SEARCH_HIGHER_BUDGET_OFFER_STATE: self.handle_search_higher_budget_offer,
@@ -927,7 +936,7 @@ class ChatbotEngine(ChatbotConversationMixin):
         data["state"] = input_value
         await self.set_data(phone, data)
         await self.set_state(phone, "SEARCH_NEIGHBOURHOOD")
-        await self._send_text_and_track(phone, "SEARCH_NEIGHBOURHOOD", "Please share the neighbourhood, area, or city you want us to search within.")
+        await self._send_prompt_once(phone, "SEARCH_NEIGHBOURHOOD", "Please share the neighbourhood, area, or city you want us to search within.")
 
 
     async def handle_search_neighbourhood(self, phone, input_value, *_args, **kwargs):
@@ -940,10 +949,59 @@ class ChatbotEngine(ChatbotConversationMixin):
 
     async def handle_search_budget(self, phone, input_value, *_args,**kwargs):
         data = await self.get_data(phone)
-        if input_value == "budget_flexible":
-            data["max_rent"] = None
-        else:
-            data["max_rent"] = float((input_value or "budget_500000").split("_")[-1])
+        band_map = {
+            "budget_100000": ("up to 100k", 100000.0),
+            "budget_250000": ("up to 250k", 250000.0),
+            "budget_500000": ("up to 500k", 500000.0),
+            "budget_more_than_500000": ("more than 500k", 500000.0),
+        }
+        band_label, default_limit = band_map.get(input_value or "", ("the selected range", None))
+        if default_limit is None:
+            try:
+                default_limit = parse_naira_amount(input_value or "")
+            except ValueError:
+                await self._send_search_budget_options(phone)
+                return
+            data["budget_band"] = "custom"
+            data["max_rent"] = float(default_limit)
+            await self.set_data(phone, data)
+            await self.set_state(phone, "SEARCH_TYPE")
+            await whatsapp.send_list(
+                phone,
+                "Great. Please select the property type you prefer.",
+                "Choose Type",
+                [{
+                    "title": "Types",
+                    "rows": [
+                        {"id": "self_contain", "title": "Self Contain"},
+                        {"id": "flat", "title": "Flat"},
+                        {"id": "duplex", "title": "Duplex"},
+                        {"id": "bungalow", "title": "Bungalow"},
+                        {"id": "office_space", "title": "Office Space"},
+                        {"id": "warehouse", "title": "Warehouse"},
+                    ],
+                }],
+            )
+            return
+
+        data["budget_band"] = input_value
+        await self.set_data(phone, data)
+        await self.set_state(phone, SEARCH_BUDGET_AMOUNT_STATE)
+        await whatsapp.send_text(
+            phone,
+            f"You selected {band_label}. Please type the exact amount you want us to work with in naira, for example 250000 or 1,200,000.",
+        )
+
+
+    async def handle_search_budget_amount(self, phone, input_value, *_args, **kwargs):
+        data = await self.get_data(phone)
+        try:
+            data["max_rent"] = float(parse_naira_amount(input_value or ""))
+        except ValueError:
+            await whatsapp.send_text(phone, "Please enter the exact budget amount in a valid format such as 250000 or 1,200,000.")
+            await self.set_state(phone, "SEARCH_BUDGET")
+            await self._send_search_budget_options(phone)
+            return
         await self.set_data(phone, data)
         await self.set_state(phone, "SEARCH_TYPE")
         await whatsapp.send_list(
@@ -1016,9 +1074,6 @@ class ChatbotEngine(ChatbotConversationMixin):
             await self.set_state(phone, "SEARCH_BUDGET")
             await whatsapp.send_text(phone, "No problem. Let us try another budget range.")
             await self._send_search_budget_options(phone)
-            return
-
-        if await self._send_llm_conversational_reply(phone, input_value, SEARCH_HIGHER_BUDGET_OFFER_STATE, data, _user, db, await self._get_recent_context(phone)):
             return
         await whatsapp.send_text(
             phone,

@@ -304,6 +304,126 @@ class TestChatbotMediaBatching:
         assert "price:" in send_text.await_args.args[1].lower()
 
     @pytest.mark.asyncio
+    async def test_search_budget_choice_requests_exact_amount(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "SEARCH_BUDGET")
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        send_list = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+
+        await engine.handle_search_budget(
+            phone=phone,
+            input_value="budget_250000",
+        )
+
+        assert await engine.get_state(phone) == "SEARCH_BUDGET_AMOUNT"
+        assert "exact amount" in send_text.await_args.args[1].lower()
+
+        send_text.reset_mock()
+        send_list.reset_mock()
+
+        await engine.handle_search_budget_amount(
+            phone=phone,
+            input_value="275000",
+        )
+
+        assert await engine.get_state(phone) == "SEARCH_TYPE"
+        saved = await engine.get_data(phone)
+        assert saved["max_rent"] == 275000.0
+        assert send_list.await_count == 1
+        assert "select the property type" in send_list.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_search_budget_amount_invalid_returns_to_range_picker(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "SEARCH_BUDGET_AMOUNT")
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        send_list = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+
+        await engine.handle_search_budget_amount(
+            phone=phone,
+            input_value="two hundred",
+        )
+
+        assert await engine.get_state(phone) == "SEARCH_BUDGET"
+        assert send_text.await_count == 1
+        assert "exact budget amount" in send_text.await_args.args[1].lower()
+        assert send_list.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_search_higher_budget_unknown_intent_stays_in_offer_flow(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "SEARCH_HIGHER_BUDGET_OFFER")
+        await engine.set_data(phone, {"over_budget_result_ids": [1]})
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="unknown", confidence=0.2, source="fallback")),
+        )
+        gen_reply = AsyncMock(return_value=SimpleNamespace(reply="Let's list it instead.", action="list_property", confidence=0.8, source="llm"))
+        monkeypatch.setattr("services.chatbot_engine.conversation_service.generate_reply", gen_reply)
+
+        await engine.handle_search_higher_budget_offer(
+            phone=phone,
+            input_value="maybe",
+            _message_type="text",
+            _media_id=None,
+            _user=SimpleNamespace(id=1),
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "SEARCH_HIGHER_BUDGET_OFFER"
+        assert "reply yes" in send_text.await_args.args[1].lower()
+        gen_reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_message_delivery_is_ignored(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+        await engine.set_state(phone, "MAIN_MENU")
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_text = AsyncMock(return_value=True)
+        send_list = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+
+        await engine.process_message(
+            phone=phone,
+            message_type="interactive",
+            text=None,
+            button_id="search_property",
+            media_id=None,
+            message_id="msg-dup",
+            db=db,
+        )
+        await engine.process_message(
+            phone=phone,
+            message_type="interactive",
+            text=None,
+            button_id="search_property",
+            media_id=None,
+            message_id="msg-dup",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "SEARCH_LOCATION"
+        assert send_text.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_account_edit_name_updates_user_profile(self, db, monkeypatch):
         engine = ChatbotEngine(redis_client=FakeRedis())
         phone = "2348012345678"

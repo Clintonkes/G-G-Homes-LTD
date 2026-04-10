@@ -23,7 +23,7 @@ ALLOWED_INTENTS = {
     "goodbye",
     "unknown",
 }
-SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
+SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_BUDGET_AMOUNT", "SEARCH_TYPE", "SEARCH_BEDROOMS", "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {
     "LIST_TITLE",
     "LIST_ADDRESS",
@@ -78,6 +78,7 @@ class IntentService:
             "SEARCH_LOCATION": "expects the state to search in",
             "SEARCH_NEIGHBOURHOOD": "expects neighbourhood, area, or city text",
             "SEARCH_BUDGET": "expects budget choice or budget amount",
+            "SEARCH_BUDGET_AMOUNT": "expects exact budget amount as a number",
             "SEARCH_TYPE": "expects preferred property type",
             "SEARCH_BEDROOMS": "expects preferred bedroom count",
             "VIEW_RESULTS": "expects selected property number",

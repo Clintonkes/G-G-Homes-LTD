@@ -19,6 +19,7 @@ from services.intent_service import intent_service
 from services.whatsapp_service import whatsapp
 from utils.helpers import format_naira, format_phone_number
 
+
 logger = logging.getLogger(__name__)
 STATE_KEY_PREFIX = "state:"
 DATA_KEY_PREFIX = "data:"
@@ -31,6 +32,7 @@ ACCOUNT_MENU_STATE = "ACCOUNT_MENU"
 ACCOUNT_EDIT_NAME_STATE = "ACCOUNT_EDIT_NAME"
 ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
+SEARCH_BUDGET_AMOUNT_STATE = "SEARCH_BUDGET_AMOUNT"
 SEARCH_NEIGHBOURHOOD_STATE = "SEARCH_NEIGHBOURHOOD"
 LIST_WATER_STATE = "LIST_WATER"
 SCHEDULE_VISITOR_NAME_STATE = "SCHEDULE_VISITOR_NAME"
@@ -39,6 +41,7 @@ SEARCH_FLOW_STATES = {
     "SEARCH_LOCATION",
     SEARCH_NEIGHBOURHOOD_STATE,
     "SEARCH_BUDGET",
+    SEARCH_BUDGET_AMOUNT_STATE,
     "SEARCH_TYPE",
     "SEARCH_BEDROOMS",
     SEARCH_HIGHER_BUDGET_OFFER_STATE,
@@ -49,6 +52,7 @@ SEARCH_FLOW_STATES = {
     SCHEDULE_VISITOR_ADDRESS_STATE,
     "SCHEDULE_CONFIRM",
 }
+
 LISTING_FLOW_STATES = {
     "LIST_TITLE",
     "LIST_ADDRESS",
@@ -67,10 +71,13 @@ LISTING_FLOW_STATES = {
     "LIST_USER_NAME",
     "LIST_USER_PHONE",
 }
+
 ACCOUNT_FLOW_STATES = {"ACCOUNT_MENU", "ACCOUNT_EDIT_NAME", "ACCOUNT_EDIT_EMAIL"}
 
 
 class ChatbotConversationMixin:
+    def _prompt_guard_key(self, phone: str, state: str) -> str:
+        return f"prompt_guard:{phone}:{state}"
     def _conversation_history_key(self, phone: str) -> str:
         return f"{CONVERSATION_HISTORY_KEY_PREFIX}{phone}"
 
@@ -147,6 +154,13 @@ class ChatbotConversationMixin:
         await whatsapp.send_text(phone, content)
         await self._append_conversation_history(phone, "assistant", state, content)
 
+    async def _send_prompt_once(self, phone: str, state: str, content: str, ttl_seconds: int = 8) -> None:
+        guard_key = self._prompt_guard_key(phone, state)
+        if await self.redis.get(guard_key):
+            return
+        await self.redis.set(guard_key, "1", ex=ttl_seconds)
+        await self._send_text_and_track(phone, state, content)
+
     async def _emit_llm_reply(self, phone: str, state: str, reply: str | None) -> None:
         text = (reply or "").strip()
         if not text:
@@ -157,7 +171,7 @@ class ChatbotConversationMixin:
         return (
             state in LISTING_FLOW_STATES
             or state in ACCOUNT_FLOW_STATES
-            or state in {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "SCHEDULE_DATE", SCHEDULE_VISITOR_NAME_STATE, SCHEDULE_VISITOR_ADDRESS_STATE, "SCHEDULE_CONFIRM", RESUME_PROMPT_STATE}
+            or state in {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", SEARCH_BUDGET_AMOUNT_STATE, "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "SCHEDULE_DATE", SCHEDULE_VISITOR_NAME_STATE, SCHEDULE_VISITOR_ADDRESS_STATE, "SCHEDULE_CONFIRM", RESUME_PROMPT_STATE}
         )
 
     def _state_instruction_text(self, state: str, data: dict) -> str:
@@ -165,6 +179,7 @@ class ChatbotConversationMixin:
             "SEARCH_LOCATION": "Please tell us the state where you want to search for a property.",
             SEARCH_NEIGHBOURHOOD_STATE: "Please tell us the neighbourhood, area, or city you want us to search within.",
             "SEARCH_BUDGET": "Please choose the budget range you would like us to work with.",
+            SEARCH_BUDGET_AMOUNT_STATE: "Please type the exact budget amount you want us to work with.",
             "SEARCH_TYPE": "Please select the property type you prefer.",
             "SEARCH_BEDROOMS": "Please choose the bedroom option that matches what you want.",
             SEARCH_HIGHER_BUDGET_OFFER_STATE: "We found options above your budget. Please tell us if you want to view them or adjust your budget.",
@@ -447,11 +462,13 @@ class ChatbotConversationMixin:
 
     async def _prompt_for_state(self, phone: str, state: str, data: dict, db: AsyncSession) -> None:
         if state == "SEARCH_LOCATION":
-            await self._send_text_and_track(phone, state, "We are continuing your property search. Which state would you like us to search in?")
+            await self._send_prompt_once(phone, state, "We are continuing your property search. Which state would you like us to search in?")
         elif state == SEARCH_NEIGHBOURHOOD_STATE:
-            await self._send_text_and_track(phone, state, "Please share the neighbourhood, area, or city you want us to search within.")
+            await self._send_prompt_once(phone, state, "Please share the neighbourhood, area, or city you want us to search within.")
         elif state == "SEARCH_BUDGET":
             await self._send_search_budget_options(phone)
+        elif state == SEARCH_BUDGET_AMOUNT_STATE:
+            await self._send_prompt_once(phone, state, "Please type the exact amount you want us to work with in naira, for example 250000 or 1,200,000.")
         elif state == "SEARCH_TYPE":
             await whatsapp.send_list(
                 phone,
