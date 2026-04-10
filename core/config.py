@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     LLM_CHAT_TEMPERATURE: float = 0.4
     LLM_CHAT_MAX_TOKENS: int = 300
 
+    AUTO_MIGRATE_ON_STARTUP: bool = True
+
     TRANSACTION_FEE_PERCENT: float = 4.0
     BASIC_SUBSCRIPTION_MONTHLY: int = 1500
     STANDARD_SUBSCRIPTION_MONTHLY: int = 3000
