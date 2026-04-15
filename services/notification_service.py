@@ -5,12 +5,39 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Payment, PaymentStatus, PaymentType, Property, User
+from database.models import Appointment, AppointmentStatus, Payment, PaymentStatus, PaymentType, Property, User
 from services.whatsapp_service import whatsapp
 from utils.helpers import format_naira
 
 
 class NotificationService:
+    async def send_inspection_day_reminders(self, db: AsyncSession) -> int:
+        sent_count = 0
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        result = await db.execute(
+            select(Appointment).where(
+                Appointment.scheduled_date >= start,
+                Appointment.scheduled_date < end,
+                Appointment.status == AppointmentStatus.confirmed,
+            )
+        )
+        for appointment in result.scalars().all():
+            tenant = await db.get(User, appointment.tenant_id)
+            prop = await db.get(Property, appointment.property_id)
+            if not tenant or not prop:
+                continue
+            sent = await whatsapp.send_text(
+                tenant.phone_number,
+                (
+                    f"Reminder: your inspection for {prop.title} is scheduled for today at "
+                    f"{appointment.scheduled_date:%d/%m/%Y %H:%M}. "
+                    "Reply if you need to reschedule or have any questions."
+                ),
+            )
+            if sent:
+                sent_count += 1
+        return sent_count
     async def send_rent_renewal_reminders(self, db: AsyncSession) -> int:
         sent_count = 0
         now = datetime.now(timezone.utc)

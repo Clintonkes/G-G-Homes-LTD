@@ -187,7 +187,7 @@ class ChatbotConversationMixin:
             "VIEW_PROPERTY": "Tap Book Inspection whenever you are ready.",
             "SCHEDULE_DATE": "Please share your preferred inspection date and time. Example: 15/07/2026 10:00.",
             SCHEDULE_VISITOR_NAME_STATE: "Please share your full name for the inspection record.",
-            SCHEDULE_VISITOR_ADDRESS_STATE: "Please share the address for the inspection record.",
+            SCHEDULE_VISITOR_ADDRESS_STATE: "Please share your address for the inspection record.",
             "SCHEDULE_CONFIRM": "Please tap Confirm when you are ready to finalize the inspection booking.",
             "LIST_TITLE": "Please share the property title.",
             "LIST_ADDRESS": "Please share the property address.",
@@ -534,7 +534,7 @@ class ChatbotConversationMixin:
         elif state == SCHEDULE_VISITOR_NAME_STATE:
             await self._send_text_and_track(phone, state, "Please share your full name for the inspection record.")
         elif state == SCHEDULE_VISITOR_ADDRESS_STATE:
-            await self._send_text_and_track(phone, state, "Please share the address for the inspection record.")
+            await self._send_text_and_track(phone, state, "Please share your address for the inspection record.")
         elif state == ACCOUNT_MENU_STATE:
             await self._open_account_service(phone, await self._get_or_create_user(phone, db), db)
         elif state == ACCOUNT_EDIT_NAME_STATE:

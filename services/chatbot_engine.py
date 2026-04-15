@@ -18,6 +18,7 @@ from services.conversation_service import conversation_service
 from services.intent_service import intent_service
 from services.media_service import media_service
 from services.property_service import property_service
+from services.payment_service import payment_service
 from services.whatsapp_service import whatsapp
 from utils.helpers import format_naira, format_phone_number, parse_naira_amount
 
@@ -85,6 +86,8 @@ class ChatbotEngine(ChatbotConversationMixin):
         mapping = {
             "search_property": "search_property",
             "list_property": "list_property",
+            "make_payment": "make_payment",
+            "pay_now": "make_payment",
             "my_account": "my_account",
             "customer_service": "customer_service",
             "account_profile": "account_profile",
@@ -472,6 +475,7 @@ class ChatbotEngine(ChatbotConversationMixin):
             return
         await self._send_text_and_track(phone, "VIEW_RESULTS", "We could not find a verified listing that matches that search just now. If you would like, we can help you refine the location, adjust your budget, or start a fresh search immediately.")
 
+
     async def send_main_menu(self, phone: str, user: User) -> None:
         await self.set_state(phone, "MAIN_MENU")
         name = self._display_name(user)
@@ -483,10 +487,13 @@ class ChatbotEngine(ChatbotConversationMixin):
             "2. Share property details, photos, videos, and inspection options\n"
             "3. Help schedule inspection visits\n"
             "4. Guide landlords through listing a property\n"
-            "5. Support account and booking-related assistance\n"
-            "6. Customer service\n\n"
+            "5. Help you pay for a property after inspection\n"
+            "6. Support account and booking-related assistance\n"
+            "7. Customer service\n\n"
             "Please choose an option below, or simply tell us what you would like help with and we will guide you from there."
         )
+
+
         await whatsapp.send_list(
             phone,
             welcome_message,
@@ -496,6 +503,7 @@ class ChatbotEngine(ChatbotConversationMixin):
                 "rows": [
                     {"id": "search_property", "title": "Find a Property"},
                     {"id": "list_property", "title": "List Property"},
+                    {"id": "make_payment", "title": "Pay Now"},
                     {"id": "my_account", "title": "My Account"},
                     {"id": "customer_service", "title": "Customer Service"},
                 ],
@@ -595,6 +603,9 @@ class ChatbotEngine(ChatbotConversationMixin):
         if intent == "customer_service":
             await self._open_customer_service(phone, state, data, db)
             return
+        if intent == "make_payment":
+            if await self._handle_payment_request(phone, user, db):
+                return
 
         if state not in STRICT_INTERRUPT_STATES and await self._handle_llm_interrupt(phone, input_value, state, data, user, db, recent_context):
             return
@@ -724,6 +735,9 @@ class ChatbotEngine(ChatbotConversationMixin):
         if intent == "customer_service":
             await whatsapp.send_text(phone, "Customer service is here to help. Tell us whether you need listing support, booking help, account help, or help finding a property.")
             return
+        if intent == "make_payment":
+            if await self._handle_payment_request(phone, user, kwargs.get("db") or _db):
+                return
         if await self._send_llm_conversational_reply(phone, input_value, "MAIN_MENU", await self.get_data(phone), user, kwargs.get("db") or _db, await self._get_recent_context(phone)):
             return
         await self.send_main_menu(phone, user)
@@ -1107,9 +1121,13 @@ class ChatbotEngine(ChatbotConversationMixin):
         await self.set_data(phone, data)
         await self.set_state(phone, "VIEW_PROPERTY")
         if prop.photo_urls:
-            await whatsapp.send_image(phone, prop.photo_urls[0], prop.title)
+            for idx, url in enumerate(prop.photo_urls, start=1):
+                caption = prop.title if idx == 1 else f"{prop.title} ({idx}/{len(prop.photo_urls)})"
+                await whatsapp.send_image(phone, url, caption)
         if prop.video_urls:
-            await whatsapp.send_video(phone, prop.video_urls[0], "Property video")
+            for idx, url in enumerate(prop.video_urls, start=1):
+                caption = "Property video" if idx == 1 else f"Property video ({idx}/{len(prop.video_urls)})"
+                await whatsapp.send_video(phone, url, caption)
         await whatsapp.send_buttons(
             phone,
             f"{prop.title}\n{prop.address}\nRent: {format_naira(prop.annual_rent)}\nAmenities: {', '.join(prop.amenities) or 'Not specified'}",
@@ -1150,7 +1168,7 @@ class ChatbotEngine(ChatbotConversationMixin):
         await db.commit()
         await db.refresh(user)
         await self.set_state(phone, "SCHEDULE_VISITOR_ADDRESS")
-        await whatsapp.send_text(phone, "Please share the address for the inspection record.")
+        await whatsapp.send_text(phone, "Please share your address for the inspection record.")
 
 
     async def handle_schedule_visitor_address(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
@@ -1203,6 +1221,26 @@ class ChatbotEngine(ChatbotConversationMixin):
         await self._remember_booking_outcome(phone, data.get("scheduled_date"))
         await self.clear_session(phone)
         await whatsapp.send_text(phone, "Your inspection has been confirmed successfully. Our team has notified the landlord, and we look forward to assisting you further.")
+
+
+    async def _handle_payment_request(self, phone: str, user: User, db: AsyncSession) -> bool:
+        result = await db.execute(
+            select(Appointment)
+            .where(Appointment.tenant_id == user.id)
+            .order_by(Appointment.scheduled_date.desc())
+        )
+        appointment = result.scalars().first()
+        if not appointment:
+            await whatsapp.send_text(phone, "I could not find an inspection booking on your account yet. Please book an inspection first, and I will help you make payment right after.")
+            return True
+        if appointment.status != AppointmentStatus.interested:
+            appointment.status = AppointmentStatus.interested
+            await db.commit()
+            await db.refresh(appointment)
+        payment = await payment_service.initialize_rent_payment(db, user, appointment.property_id)
+        await self.set_state(phone, "AWAIT_PAYMENT")
+        await whatsapp.send_text(phone, f"Proceed with your payment here: {payment['payment_url']}")
+        return True
 
 
     async def handle_await_payment(self, phone, *_args, **kwargs):
