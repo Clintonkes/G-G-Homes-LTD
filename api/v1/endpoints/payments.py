@@ -9,9 +9,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from database.models import Payment, PaymentStatus, Property
+from database.models import Payment, PaymentStatus, Property, Transaction
 from database.models import User
-from database.schema import PaymentRead
+from database.schema import PaymentRead, TransactionRead
 from database.session import get_db
 from services.payment_service import payment_service
 from services.whatsapp_service import whatsapp
@@ -52,6 +52,12 @@ async def _notify_payment_outcome(db: AsyncSession, payment: Payment) -> None:
 @router.get("/pending-remittances", response_model=list[PaymentRead])
 async def get_pending_remittances(db: AsyncSession = Depends(get_db)) -> list[Payment]:
     result = await db.execute(select(Payment).where(Payment.status == PaymentStatus.success, Payment.landlord_remitted.is_(False)))
+    return list(result.scalars().all())
+
+
+@router.get("/transactions", response_model=list[TransactionRead])
+async def list_transactions(db: AsyncSession = Depends(get_db)) -> list[Transaction]:
+    result = await db.execute(select(Transaction).order_by(Transaction.created_at.desc()))
     return list(result.scalars().all())
 
 

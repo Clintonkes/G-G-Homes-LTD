@@ -66,6 +66,15 @@ class PaymentStatus(str, enum.Enum):
     refunded = "refunded"
 
 
+class TransactionStatus(str, enum.Enum):
+    """Gateway-level transaction status for each payment attempt."""
+
+    pending = "pending"
+    success = "success"
+    failed = "failed"
+    abandoned = "abandoned"
+
+
 class AppointmentStatus(str, enum.Enum):
     """Status values for inspection/visit appointments."""
 
@@ -230,6 +239,29 @@ class Payment(Base):
 
     property: Mapped["Property | None"] = relationship(back_populates="payments")
     appointment: Mapped["Appointment | None"] = relationship(back_populates="payments")
+    transactions: Mapped[list["Transaction"]] = relationship(back_populates="payment")
+
+
+class Transaction(Base):
+    """Stores provider responses and status for each payment attempt."""
+
+    __tablename__ = "transactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payment_id: Mapped[int] = mapped_column(ForeignKey("payments.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(50), default="paystack")
+    provider_reference: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    status: Mapped[TransactionStatus] = mapped_column(Enum(TransactionStatus), default=TransactionStatus.pending)
+    amount: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(10), default="NGN")
+    gateway_status: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    gateway_response: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    verification_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    raw_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    verified_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    payment: Mapped["Payment"] = relationship(back_populates="transactions")
 
 
 class Subscription(Base):

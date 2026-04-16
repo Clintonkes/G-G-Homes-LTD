@@ -14,6 +14,7 @@ from database.models import (
     PropertyType,
     SubscriptionPlan,
     SubscriptionStatus,
+    TransactionStatus,
     UserRole,
 )
 
@@ -152,6 +153,21 @@ class PaymentRead(ORMBase):
     checkout_url: str | None = None
     status: PaymentStatus
     landlord_remitted: bool
+
+
+class TransactionRead(ORMBase):
+    id: int
+    payment_id: int
+    provider: str
+    provider_reference: str
+    status: TransactionStatus
+    amount: float
+    currency: str
+    gateway_status: str | None = None
+    gateway_response: str | None = None
+    verification_message: str | None = None
+    verified_at: datetime | None = None
+    created_at: datetime | None = None
 
 
 class PropertyPaymentSummary(ORMBase):

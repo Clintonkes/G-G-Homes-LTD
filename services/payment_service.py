@@ -1,5 +1,6 @@
 """Payment orchestration service for initializing and verifying Paystack transactions."""
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -7,9 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from database.models import Appointment, AppointmentStatus, Payment, PaymentStatus, PaymentType, Property, PropertyStatus, User
+from database.models import Appointment, AppointmentStatus, Payment, PaymentStatus, PaymentType, Property, PropertyStatus, Transaction, TransactionStatus, User
 
 PAYSTACK_BASE_URL = "https://api.paystack.co"
+logger = logging.getLogger(__name__)
 
 
 class PaymentService:
@@ -65,7 +67,14 @@ class PaymentService:
                 },
             )
         response.raise_for_status()
-        data = response.json()["data"]
+        response_json = response.json()
+        data = response_json["data"]
+        logger.info(
+            "Paystack initialize response received; reference=%s status=%s message=%s",
+            data.get("reference"),
+            response_json.get("status"),
+            response_json.get("message"),
+        )
 
         payment = Payment(
             payer_id=tenant.id,
@@ -84,6 +93,20 @@ class PaymentService:
             tenancy_end_date=datetime.now(timezone.utc) + timedelta(days=365),
         )
         db.add(payment)
+        await db.flush()
+        transaction = Transaction(
+            payment_id=payment.id,
+            provider="paystack",
+            provider_reference=data["reference"],
+            status=TransactionStatus.pending,
+            amount=gross_amount,
+            currency="NGN",
+            gateway_status=str(response_json.get("status")),
+            gateway_response=response_json.get("message"),
+            verification_message="Transaction initialized successfully.",
+            raw_payload=response_json,
+        )
+        db.add(transaction)
         await db.commit()
         await db.refresh(payment)
         return {
@@ -99,12 +122,24 @@ class PaymentService:
                 headers={"Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}"},
             )
         response.raise_for_status()
-        paystack_data = response.json()["data"]
+        response_json = response.json()
+        paystack_data = response_json["data"]
+        logger.info(
+            "Paystack verify response received; reference=%s status=%s gateway_response=%s",
+            reference,
+            paystack_data.get("status"),
+            paystack_data.get("gateway_response"),
+        )
 
         result = await db.execute(select(Payment).where(Payment.paystack_reference == reference))
         payment = result.scalar_one_or_none()
         if not payment:
             return None
+
+        transaction_result = await db.execute(
+            select(Transaction).where(Transaction.provider_reference == reference).order_by(Transaction.created_at.desc())
+        )
+        transaction = transaction_result.scalars().first()
 
         if paystack_data["status"] == "success":
             payment.status = PaymentStatus.success
@@ -115,8 +150,18 @@ class PaymentService:
                 appointment = await db.get(Appointment, payment.appointment_id)
                 if appointment:
                     appointment.status = AppointmentStatus.completed
+            transaction_status = TransactionStatus.success
         else:
             payment.status = PaymentStatus.failed
+            transaction_status = TransactionStatus.failed
+
+        if transaction:
+            transaction.status = transaction_status
+            transaction.gateway_status = str(paystack_data.get("status"))
+            transaction.gateway_response = paystack_data.get("gateway_response")
+            transaction.verification_message = response_json.get("message")
+            transaction.raw_payload = response_json
+            transaction.verified_at = datetime.now(timezone.utc)
 
         await db.commit()
         await db.refresh(payment)
