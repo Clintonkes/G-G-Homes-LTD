@@ -7,6 +7,7 @@ Create Date: 2026-04-16 00:00:00.000000
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision = "009_add_transactions_table"
@@ -16,7 +17,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    transactionstatus = sa.Enum("pending", "success", "failed", "abandoned", name="transactionstatus", create_type=False)
+    transactionstatus = postgresql.ENUM("pending", "success", "failed", "abandoned", name="transactionstatus", create_type=False)
     transactionstatus.create(op.get_bind(), checkfirst=True)
     op.create_table(
         "transactions",
@@ -44,5 +45,5 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_transactions_provider_reference"), table_name="transactions")
     op.drop_index(op.f("ix_transactions_payment_id"), table_name="transactions")
     op.drop_table("transactions")
-    transactionstatus = sa.Enum("pending", "success", "failed", "abandoned", name="transactionstatus", create_type=False)
+    transactionstatus = postgresql.ENUM("pending", "success", "failed", "abandoned", name="transactionstatus", create_type=False)
     transactionstatus.drop(op.get_bind(), checkfirst=True)
