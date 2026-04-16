@@ -110,6 +110,8 @@ class AppointmentCreate(BaseModel):
     landlord_id: int
     scheduled_date: datetime
     notes: str | None = None
+    original_rent_amount: float | None = None
+    agreed_rent_amount: float | None = None
     tenant_full_name_snapshot: str | None = None
     tenant_phone_snapshot: str | None = None
     tenant_address_snapshot: str | None = None
@@ -128,6 +130,8 @@ class AppointmentRead(ORMBase):
     scheduled_date: datetime
     status: AppointmentStatus
     notes: str | None = None
+    original_rent_amount: float | None = None
+    agreed_rent_amount: float | None = None
     tenant_full_name_snapshot: str | None = None
     tenant_phone_snapshot: str | None = None
     tenant_address_snapshot: str | None = None
@@ -137,13 +141,25 @@ class PaymentRead(ORMBase):
     id: int
     payer_id: int
     property_id: int | None = None
+    appointment_id: int | None = None
     payment_type: PaymentType
+    quoted_amount: float | None = None
+    agreed_amount: float | None = None
     gross_amount: float
     platform_fee: float
     net_amount: float
     paystack_reference: str
+    checkout_url: str | None = None
     status: PaymentStatus
     landlord_remitted: bool
+
+
+class PropertyPaymentSummary(ORMBase):
+    property_id: int
+    total_payments: int
+    active_payments: list[PaymentRead]
+    pending_payments: list[PaymentRead]
+    ended_payments: list[PaymentRead]
 
 
 class SubscriptionRead(ORMBase):

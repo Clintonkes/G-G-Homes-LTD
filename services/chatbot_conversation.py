@@ -33,6 +33,7 @@ ACCOUNT_EDIT_NAME_STATE = "ACCOUNT_EDIT_NAME"
 ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
 SEARCH_BUDGET_AMOUNT_STATE = "SEARCH_BUDGET_AMOUNT"
+PAYMENT_SELECT_PROPERTY_STATE = "PAYMENT_SELECT_PROPERTY"
 SEARCH_NEIGHBOURHOOD_STATE = "SEARCH_NEIGHBOURHOOD"
 LIST_WATER_STATE = "LIST_WATER"
 SCHEDULE_VISITOR_NAME_STATE = "SCHEDULE_VISITOR_NAME"
@@ -51,6 +52,7 @@ SEARCH_FLOW_STATES = {
     SCHEDULE_VISITOR_NAME_STATE,
     SCHEDULE_VISITOR_ADDRESS_STATE,
     "SCHEDULE_CONFIRM",
+    PAYMENT_SELECT_PROPERTY_STATE,
 }
 
 LISTING_FLOW_STATES = {
@@ -78,6 +80,7 @@ ACCOUNT_FLOW_STATES = {"ACCOUNT_MENU", "ACCOUNT_EDIT_NAME", "ACCOUNT_EDIT_EMAIL"
 class ChatbotConversationMixin:
     def _prompt_guard_key(self, phone: str, state: str) -> str:
         return f"prompt_guard:{phone}:{state}"
+
     def _conversation_history_key(self, phone: str) -> str:
         return f"{CONVERSATION_HISTORY_KEY_PREFIX}{phone}"
 
@@ -171,7 +174,7 @@ class ChatbotConversationMixin:
         return (
             state in LISTING_FLOW_STATES
             or state in ACCOUNT_FLOW_STATES
-            or state in {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", SEARCH_BUDGET_AMOUNT_STATE, "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "SCHEDULE_DATE", SCHEDULE_VISITOR_NAME_STATE, SCHEDULE_VISITOR_ADDRESS_STATE, "SCHEDULE_CONFIRM", RESUME_PROMPT_STATE}
+            or state in {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", SEARCH_BUDGET_AMOUNT_STATE, "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "SCHEDULE_DATE", SCHEDULE_VISITOR_NAME_STATE, SCHEDULE_VISITOR_ADDRESS_STATE, "SCHEDULE_CONFIRM", PAYMENT_SELECT_PROPERTY_STATE, RESUME_PROMPT_STATE}
         )
 
     def _state_instruction_text(self, state: str, data: dict) -> str:
@@ -189,6 +192,7 @@ class ChatbotConversationMixin:
             SCHEDULE_VISITOR_NAME_STATE: "Please share your full name for the inspection record.",
             SCHEDULE_VISITOR_ADDRESS_STATE: "Please share your address for the inspection record.",
             "SCHEDULE_CONFIRM": "Please tap Confirm when you are ready to finalize the inspection booking.",
+            PAYMENT_SELECT_PROPERTY_STATE: "Please choose the inspected property you want to pay for.",
             "LIST_TITLE": "Please share the property title.",
             "LIST_ADDRESS": "Please share the property address.",
             "LIST_NEIGHBOURHOOD": "Please share the neighbourhood and a nearby landmark for this property.",
@@ -329,7 +333,7 @@ class ChatbotConversationMixin:
             recent_context=recent_context,
             data_context=self._conversation_data_context(state, data, recent_context),
         )
-        if not llm_reply or llm_reply.action not in {"restart", "switch_service", "search_property", "list_property", "my_account", "customer_service"}:
+        if not llm_reply or llm_reply.action not in {"restart", "switch_service", "search_property", "list_property", "my_account", "customer_service", "make_payment"}:
             return False
 
         logger.debug("LLM interrupt routed; state=%s phone=%s action=%s confidence=%.2f", state, phone, llm_reply.action, llm_reply.confidence)
@@ -355,6 +359,9 @@ class ChatbotConversationMixin:
             return True
         if llm_reply.action == "customer_service":
             await self._open_customer_service(phone, state, data, db)
+            return True
+        if llm_reply.action == "make_payment":
+            await self._handle_payment_request(phone, user, db)
             return True
         return False
 

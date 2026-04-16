@@ -1,6 +1,6 @@
 """Unit tests covering security helpers and selected service-layer behaviors."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select
 
 from core.security import create_access_token, decode_access_token, hash_password, verify_password
-from database.models import Appointment, AppointmentStatus, Property, PropertyStatus, PropertyType, User, UserRole
+from database.models import Appointment, AppointmentStatus, Payment, PaymentStatus, PaymentType, Property, PropertyStatus, PropertyType, User, UserRole
 from services.chatbot_engine import ChatbotEngine
 from services.property_service import PropertyService
 
@@ -1110,6 +1110,153 @@ class TestChatbotMediaBatching:
         assert await engine.get_state(phone) == "MAIN_MENU"
 
     @pytest.mark.asyncio
+    async def test_payment_request_prompts_for_multiple_inspected_properties(self, db, monkeypatch, sample_property):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348012345678"
+
+        tenant = User(full_name="Buyer One", phone_number=phone, role=UserRole.tenant)
+        landlord = User(full_name="Landlord Two", phone_number="2348077777777", role=UserRole.landlord)
+        db.add_all([tenant, landlord])
+        await db.flush()
+
+        second_property = Property(
+            landlord_id=landlord.id,
+            title="Garden Apartment",
+            address="4 Peace Avenue",
+            neighbourhood="Central",
+            city="Abakaliki",
+            state="Ebonyi",
+            property_type=PropertyType.flat,
+            bedrooms=2,
+            annual_rent=350000.0,
+            status=PropertyStatus.active,
+            is_verified=True,
+        )
+        db.add(second_property)
+        await db.flush()
+
+        appointment_one = Appointment(
+            property_id=sample_property.id,
+            tenant_id=tenant.id,
+            landlord_id=sample_property.landlord_id,
+            scheduled_date=datetime(2026, 7, 15, 10, 0),
+            status=AppointmentStatus.confirmed,
+            original_rent_amount=250000.0,
+            agreed_rent_amount=220000.0,
+        )
+        appointment_two = Appointment(
+            property_id=second_property.id,
+            tenant_id=tenant.id,
+            landlord_id=landlord.id,
+            scheduled_date=datetime(2026, 7, 16, 11, 0),
+            status=AppointmentStatus.confirmed,
+            original_rent_amount=350000.0,
+            agreed_rent_amount=330000.0,
+        )
+        db.add_all([appointment_one, appointment_two])
+        await db.commit()
+
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_list = AsyncMock(return_value=True)
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        handled = await engine._handle_payment_request(phone, tenant, db)
+
+        assert handled is True
+        assert await engine.get_state(phone) == "PAYMENT_SELECT_PROPERTY"
+        saved = await engine.get_data(phone)
+        assert sorted(saved["payment_candidate_ids"]) == sorted([appointment_one.id, appointment_two.id])
+        assert send_list.await_count == 1
+        assert "choose the property you want to pay for" in send_list.await_args.args[1].lower()
+
+        checkout = AsyncMock(return_value={"payment_url": "https://checkout.example/pay", "reference": "ref-123", "gross_amount": 220000.0})
+        monkeypatch.setattr("services.chatbot_engine.payment_service.initialize_rent_payment", checkout)
+
+        await engine.handle_payment_select_property(
+            phone=phone,
+            input_value=f"pay_appt_{appointment_one.id}",
+            _message_type="interactive",
+            _media_id=None,
+            user=tenant,
+            db=db,
+        )
+
+        checkout.assert_awaited_once()
+        assert checkout.await_args.kwargs["appointment_id"] == appointment_one.id
+        assert float(checkout.await_args.kwargs["agreed_amount"]) == 220000.0
+        assert await engine.get_state(phone) == "AWAIT_PAYMENT"
+        assert "listed amount" in send_text.await_args.args[1].lower()
+        assert "checkout.example" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_pending_payment_reuses_existing_checkout_url(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        tenant = User(full_name="Buyer Two", phone_number="2348011111111", role=UserRole.tenant)
+        landlord = User(full_name="Landlord Three", phone_number="2348088888888", role=UserRole.landlord)
+        db.add_all([tenant, landlord])
+        await db.flush()
+        prop = Property(
+            landlord_id=landlord.id,
+            title="Reuse Checkout Flat",
+            address="10 Unity Road",
+            neighbourhood="GRA",
+            city="Abakaliki",
+            state="Ebonyi",
+            property_type=PropertyType.flat,
+            bedrooms=2,
+            annual_rent=300000.0,
+            status=PropertyStatus.active,
+            is_verified=True,
+        )
+        db.add(prop)
+        await db.flush()
+        appointment = Appointment(
+            property_id=prop.id,
+            tenant_id=tenant.id,
+            landlord_id=landlord.id,
+            scheduled_date=datetime(2026, 8, 1, 12, 0),
+            status=AppointmentStatus.interested,
+            original_rent_amount=300000.0,
+            agreed_rent_amount=280000.0,
+        )
+        db.add(appointment)
+        await db.flush()
+        payment = Payment(
+            payer_id=tenant.id,
+            property_id=prop.id,
+            appointment_id=appointment.id,
+            payment_type=PaymentType.rent,
+            quoted_amount=300000.0,
+            agreed_amount=280000.0,
+            gross_amount=280000.0,
+            platform_fee=11200.0,
+            net_amount=268800.0,
+            paystack_reference="ref_existing",
+            checkout_url="https://checkout.example/existing",
+            status=PaymentStatus.pending,
+        )
+        db.add(payment)
+        await db.commit()
+
+        send_text = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", send_text)
+
+        result = await engine._handle_payment_request(tenant.phone_number, tenant, db)
+        assert result is True
+
+        await engine.handle_payment_select_property(
+            phone=tenant.phone_number,
+            input_value=f"pay_appt_{appointment.id}",
+            _message_type="interactive",
+            _media_id=None,
+            user=tenant,
+            db=db,
+        )
+        assert "checkout" in send_text.await_args.args[1].lower()
+
+    @pytest.mark.asyncio
     async def test_llm_reply_is_saved_in_conversation_history(self, db, monkeypatch):
         engine = ChatbotEngine(redis_client=FakeRedis())
         phone = "2348012345678"
@@ -1211,6 +1358,7 @@ class TestChatbotMediaBatching:
 
         assert send_list.await_count == 1
         args = send_list.await_args.args
-        assert "6. Customer service" in args[1]
+        assert "5. Help you pay for a property after inspection" in args[1]
+        assert "7. Customer service" in args[1]
         rows = args[3][0]["rows"]
         assert any(row["id"] == "customer_service" and row["title"] == "Customer Service" for row in rows)

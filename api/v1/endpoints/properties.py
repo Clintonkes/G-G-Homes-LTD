@@ -3,11 +3,12 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.dependencies import get_current_admin_user
-from database.models import Property, PropertyStatus
-from database.schema import PropertyCreate, PropertyRead
+from database.models import Appointment, Payment, PaymentStatus, Property, PropertyStatus
+from database.schema import PropertyCreate, PropertyPaymentSummary, PropertyRead
 from database.session import get_db
 from services.property_service import property_service
 from services.whatsapp_service import whatsapp
@@ -67,3 +68,39 @@ async def verify_property(property_id: int, _admin=Depends(get_current_admin_use
             f"Congratulations {name}. Your property '{prop.title}' has been verified, listed successfully, and is now available for prospective tenants on G & G Homes Ltd.",
         )
     return prop
+
+
+@router.get("/{property_id}/payments", response_model=PropertyPaymentSummary)
+async def get_property_payments(property_id: int, db: AsyncSession = Depends(get_db)) -> PropertyPaymentSummary:
+    prop = await db.get(Property, property_id)
+    if not prop:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Property not found")
+
+    result = await db.execute(
+        select(Payment).where(Payment.property_id == property_id).order_by(Payment.created_at.desc())
+    )
+    payments = list(result.scalars().all())
+
+    active_payments = []
+    pending_payments = []
+    ended_payments = []
+    now = datetime.now(timezone.utc)
+    for payment in payments:
+        if payment.status == PaymentStatus.pending:
+            pending_payments.append(payment)
+            continue
+        tenancy_end_date = payment.tenancy_end_date
+        if tenancy_end_date and tenancy_end_date.tzinfo is None:
+            tenancy_end_date = tenancy_end_date.replace(tzinfo=timezone.utc)
+        if tenancy_end_date and tenancy_end_date >= now:
+            active_payments.append(payment)
+        else:
+            ended_payments.append(payment)
+
+    return PropertyPaymentSummary(
+        property_id=property_id,
+        total_payments=len(payments),
+        active_payments=active_payments,
+        pending_payments=pending_payments,
+        ended_payments=ended_payments,
+    )

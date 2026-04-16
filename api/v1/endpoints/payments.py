@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from database.models import Payment, PaymentStatus
+from database.models import User
 from database.schema import PaymentRead
 from database.session import get_db
 from services.payment_service import payment_service
@@ -65,5 +66,10 @@ async def paystack_webhook(request: Request, db: AsyncSession = Depends(get_db))
     if event == "charge.success" and reference:
         payment = await payment_service.verify_payment(db, reference)
         if payment:
-            await whatsapp.send_text("2348000000000", f"Payment {payment.paystack_reference} has been verified successfully.")
+            tenant = await db.get(User, payment.payer_id)
+            if tenant:
+                await whatsapp.send_text(
+                    tenant.phone_number,
+                    f"Your payment for reference {payment.paystack_reference} has been verified successfully. Thank you for choosing G & G Homes Ltd.",
+                )
     return {"status": "ok"}

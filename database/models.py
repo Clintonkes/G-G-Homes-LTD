@@ -184,6 +184,8 @@ class Appointment(Base):
     scheduled_date: Mapped[DateTime] = mapped_column(DateTime(timezone=True))
     status: Mapped[AppointmentStatus] = mapped_column(Enum(AppointmentStatus), default=AppointmentStatus.confirmed)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    original_rent_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    agreed_rent_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     tenant_full_name_snapshot: Mapped[str | None] = mapped_column(String(200), nullable=True)
     tenant_phone_snapshot: Mapped[str | None] = mapped_column(String(20), nullable=True)
     tenant_address_snapshot: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -194,6 +196,7 @@ class Appointment(Base):
     property: Mapped["Property"] = relationship(back_populates="appointments")
     tenant: Mapped["User"] = relationship(back_populates="appointments_as_tenant", foreign_keys=[tenant_id])
     landlord: Mapped["User"] = relationship(back_populates="appointments_as_landlord", foreign_keys=[landlord_id])
+    payments: Mapped[list["Payment"]] = relationship(back_populates="appointment")
 
 
 class Payment(Base):
@@ -205,13 +208,17 @@ class Payment(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     payer_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     property_id: Mapped[int | None] = mapped_column(ForeignKey("properties.id"), nullable=True)
+    appointment_id: Mapped[int | None] = mapped_column(ForeignKey("appointments.id"), nullable=True, index=True)
     # Payment business context and amount breakdown
     payment_type: Mapped[PaymentType] = mapped_column(Enum(PaymentType))
+    quoted_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    agreed_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     gross_amount: Mapped[float] = mapped_column(Float)
     platform_fee: Mapped[float] = mapped_column(Float)
     net_amount: Mapped[float] = mapped_column(Float)
     # Gateway and payout lifecycle tracking
     paystack_reference: Mapped[str] = mapped_column(String(100), unique=True)
+    checkout_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[PaymentStatus] = mapped_column(Enum(PaymentStatus), default=PaymentStatus.pending)
     landlord_remitted: Mapped[bool] = mapped_column(Boolean, default=False)
     remitted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -222,6 +229,7 @@ class Payment(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     property: Mapped["Property | None"] = relationship(back_populates="payments")
+    appointment: Mapped["Appointment | None"] = relationship(back_populates="payments")
 
 
 class Subscription(Base):

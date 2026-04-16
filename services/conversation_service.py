@@ -17,6 +17,7 @@ ALLOWED_ACTIONS = {
     "list_property",
     "my_account",
     "customer_service",
+    "make_payment",
     "switch_service",
 }
 
@@ -87,7 +88,7 @@ class ConversationService:
             "Use action continue when the user is answering the current step. "
             "Use action restart when the user wants to start over. "
             "Use action switch_service when the user wants to change to another service without naming it clearly. "
-            "Use action search_property, list_property, my_account, or customer_service when the user clearly wants that new path. "
+            "Use action search_property, list_property, my_account, customer_service, or make_payment when the user clearly wants that new path. "
             "Do not mention internal states, rules, or JSON. "
             "Do not rely on exact phrases; infer the user's intent semantically."
         )

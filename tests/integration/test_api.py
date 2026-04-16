@@ -1,8 +1,11 @@
 """Integration tests covering API authentication, property, and webhook behavior."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from core.config import settings
+from database.models import Appointment, AppointmentStatus, Payment, PaymentStatus, PaymentType, Property, PropertyStatus, PropertyType, User, UserRole
 
 
 class TestAuthentication:
@@ -35,6 +38,93 @@ class TestPropertyEndpoints:
     async def test_nonexistent_property_404(self, client):
         response = await client.get("/api/v1/properties/99999")
         assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_property_payments_summary_groups_records(self, client, db, sample_property):
+        tenant = User(full_name="Buyer", phone_number="2348012222222", role=UserRole.tenant)
+        db.add(tenant)
+        await db.flush()
+
+        appointment_active = Appointment(
+            property_id=sample_property.id,
+            tenant_id=tenant.id,
+            landlord_id=sample_property.landlord_id,
+            scheduled_date=datetime.now(timezone.utc),
+            status=AppointmentStatus.interested,
+            original_rent_amount=250000.0,
+            agreed_rent_amount=220000.0,
+        )
+        appointment_ended = Appointment(
+            property_id=sample_property.id,
+            tenant_id=tenant.id,
+            landlord_id=sample_property.landlord_id,
+            scheduled_date=datetime.now(timezone.utc) - timedelta(days=30),
+            status=AppointmentStatus.completed,
+            original_rent_amount=250000.0,
+            agreed_rent_amount=210000.0,
+        )
+        db.add_all([appointment_active, appointment_ended])
+        await db.flush()
+
+        db.add_all(
+            [
+                Payment(
+                    payer_id=tenant.id,
+                    property_id=sample_property.id,
+                    appointment_id=appointment_active.id,
+                    payment_type=PaymentType.rent,
+                    quoted_amount=250000.0,
+                    agreed_amount=220000.0,
+                    gross_amount=220000.0,
+                    platform_fee=8800.0,
+                    net_amount=211200.0,
+                    paystack_reference="ref-active",
+                    checkout_url="https://checkout.example/active",
+                    status=PaymentStatus.success,
+                    tenancy_start_date=datetime.now(timezone.utc) - timedelta(days=20),
+                    tenancy_end_date=datetime.now(timezone.utc) + timedelta(days=340),
+                ),
+                Payment(
+                    payer_id=tenant.id,
+                    property_id=sample_property.id,
+                    appointment_id=appointment_ended.id,
+                    payment_type=PaymentType.rent,
+                    quoted_amount=250000.0,
+                    agreed_amount=210000.0,
+                    gross_amount=210000.0,
+                    platform_fee=8400.0,
+                    net_amount=201600.0,
+                    paystack_reference="ref-ended",
+                    checkout_url="https://checkout.example/ended",
+                    status=PaymentStatus.success,
+                    tenancy_start_date=datetime.now(timezone.utc) - timedelta(days=400),
+                    tenancy_end_date=datetime.now(timezone.utc) - timedelta(days=35),
+                ),
+                Payment(
+                    payer_id=tenant.id,
+                    property_id=sample_property.id,
+                    payment_type=PaymentType.rent,
+                    quoted_amount=250000.0,
+                    agreed_amount=200000.0,
+                    gross_amount=200000.0,
+                    platform_fee=8000.0,
+                    net_amount=192000.0,
+                    paystack_reference="ref-pending",
+                    checkout_url="https://checkout.example/pending",
+                    status=PaymentStatus.pending,
+                ),
+            ]
+        )
+        await db.commit()
+
+        response = await client.get(f"/api/v1/properties/{sample_property.id}/payments")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["property_id"] == sample_property.id
+        assert payload["total_payments"] == 3
+        assert len(payload["active_payments"]) == 1
+        assert len(payload["pending_payments"]) == 1
+        assert len(payload["ended_payments"]) == 1
 
 
 class TestWebhookEndpoints:

@@ -12,7 +12,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from database.models import Appointment, AppointmentStatus, Payment, Property, PropertyStatus, PropertyType, Subscription, User, UserRole
+from database.models import Appointment, AppointmentStatus, Payment, PaymentStatus, Property, PropertyStatus, PropertyType, Subscription, User, UserRole
 from services.chatbot_conversation import ChatbotConversationMixin
 from services.conversation_service import conversation_service
 from services.intent_service import intent_service
@@ -37,11 +37,12 @@ ACCOUNT_EDIT_NAME_STATE = "ACCOUNT_EDIT_NAME"
 ACCOUNT_EDIT_EMAIL_STATE = "ACCOUNT_EDIT_EMAIL"
 SEARCH_HIGHER_BUDGET_OFFER_STATE = "SEARCH_HIGHER_BUDGET_OFFER"
 SEARCH_BUDGET_AMOUNT_STATE = "SEARCH_BUDGET_AMOUNT"
+PAYMENT_SELECT_PROPERTY_STATE = "PAYMENT_SELECT_PROPERTY"
 SEARCH_FLOW_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", SEARCH_BUDGET_AMOUNT_STATE, "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "VIEW_RESULTS", "VIEW_PROPERTY", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
 LISTING_FLOW_STATES = {"LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_WATER", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE"}
 ACCOUNT_FLOW_STATES = {ACCOUNT_MENU_STATE, ACCOUNT_EDIT_NAME_STATE, ACCOUNT_EDIT_EMAIL_STATE}
-STRICT_INTERRUPT_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", SEARCH_BUDGET_AMOUNT_STATE, "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, "LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_WATER", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
-LLM_ROUTING_ACTIONS = {"restart", "switch_service", "search_property", "list_property", "my_account", "customer_service"}
+STRICT_INTERRUPT_STATES = {"SEARCH_LOCATION", "SEARCH_NEIGHBOURHOOD", "SEARCH_BUDGET", SEARCH_BUDGET_AMOUNT_STATE, "SEARCH_TYPE", "SEARCH_BEDROOMS", SEARCH_HIGHER_BUDGET_OFFER_STATE, PAYMENT_SELECT_PROPERTY_STATE, "LIST_TITLE", "LIST_ADDRESS", "LIST_NEIGHBOURHOOD", "LIST_CITY", "LIST_STATE", "LIST_TYPE", "LIST_BEDROOMS", LIST_BEDROOMS_CUSTOM_STATE, "LIST_RENT", "LIST_AMENITIES", "LIST_WATER", "LIST_PHOTOS", "LIST_DOCUMENTS", "LIST_LEGAL_REP", "LIST_USER_NAME", "LIST_USER_PHONE", "SCHEDULE_DATE", "SCHEDULE_VISITOR_NAME", "SCHEDULE_VISITOR_ADDRESS", "SCHEDULE_CONFIRM"}
+LLM_ROUTING_ACTIONS = {"restart", "switch_service", "search_property", "list_property", "my_account", "customer_service", "make_payment"}
 
 
 class ChatbotEngine(ChatbotConversationMixin):
@@ -641,6 +642,7 @@ class ChatbotEngine(ChatbotConversationMixin):
             "SCHEDULE_VISITOR_NAME": self.handle_schedule_visitor_name,
             "SCHEDULE_VISITOR_ADDRESS": self.handle_schedule_visitor_address,
             "SCHEDULE_CONFIRM": self.handle_schedule_confirm,
+            PAYMENT_SELECT_PROPERTY_STATE: self.handle_payment_select_property,
             "AWAIT_PAYMENT": self.handle_await_payment,
             CUSTOMER_SERVICE_STATE: self.handle_customer_service,
             ACCOUNT_MENU_STATE: self.handle_account_menu,
@@ -696,6 +698,9 @@ class ChatbotEngine(ChatbotConversationMixin):
         if intent == "customer_service":
             await self._open_customer_service(phone, "MAIN_MENU", data, db)
             return
+        if intent == "make_payment":
+            if await self._handle_payment_request(phone, user, db):
+                return
 
         if is_resume:
             target_state = data.get("resume_target_state", "MAIN_MENU")
@@ -766,6 +771,9 @@ class ChatbotEngine(ChatbotConversationMixin):
         if intent == "my_account":
             await self._open_account_service(phone, user, db)
             return
+        if intent == "make_payment":
+            if await self._handle_payment_request(phone, user, db):
+                return
         if intent == "status_check":
             recent_context = await self._get_recent_context(phone)
             if await self._handle_recent_context_message(phone, input_value, recent_context, active_state=None, current_state=CUSTOMER_SERVICE_STATE):
@@ -1212,6 +1220,8 @@ class ChatbotEngine(ChatbotConversationMixin):
             landlord_id=prop.landlord_id,
             scheduled_date=datetime.fromisoformat(data["scheduled_date"]),
             status=AppointmentStatus.confirmed,
+            original_rent_amount=float(prop.annual_rent),
+            agreed_rent_amount=float(data.get("agreed_rent_amount") or prop.annual_rent),
             tenant_full_name_snapshot=data.get("inspection_contact_name") or user.full_name,
             tenant_phone_snapshot=format_phone_number(user.phone_number),
             tenant_address_snapshot=data.get("inspection_contact_address") or user.residential_address,
@@ -1223,23 +1233,116 @@ class ChatbotEngine(ChatbotConversationMixin):
         await whatsapp.send_text(phone, "Your inspection has been confirmed successfully. Our team has notified the landlord, and we look forward to assisting you further.")
 
 
-    async def _handle_payment_request(self, phone: str, user: User, db: AsyncSession) -> bool:
+    async def _get_payment_candidates(self, db, user: User) -> list[Appointment]:
         result = await db.execute(
             select(Appointment)
             .where(Appointment.tenant_id == user.id)
             .order_by(Appointment.scheduled_date.desc())
         )
-        appointment = result.scalars().first()
-        if not appointment:
-            await whatsapp.send_text(phone, "I could not find an inspection booking on your account yet. Please book an inspection first, and I will help you make payment right after.")
-            return True
+        appointments = result.scalars().all()
+        payable: list[Appointment] = []
+        for appointment in appointments:
+            payment_result = await db.execute(
+                select(Payment).where(
+                    Payment.appointment_id == appointment.id,
+                    Payment.status == PaymentStatus.success,
+                )
+            )
+            if payment_result.scalar_one_or_none():
+                continue
+            if appointment.status in {AppointmentStatus.confirmed, AppointmentStatus.interested, AppointmentStatus.completed}:
+                payable.append(appointment)
+        return payable
+
+    async def _prompt_payment_selection(self, phone: str, appointments: list[Appointment], db) -> None:
+        rows = []
+        for appointment in appointments[:10]:
+            prop = await db.get(Property, appointment.property_id)
+            if not prop:
+                continue
+            original_amount = appointment.original_rent_amount or prop.annual_rent
+            agreed_amount = appointment.agreed_rent_amount or prop.annual_rent
+            rows.append(
+                {
+                    "id": f"pay_appt_{appointment.id}",
+                    "title": f"{prop.title[:40]}",
+                    "description": (
+                        f"Booked: {appointment.scheduled_date:%d/%m/%Y} | "
+                        f"Listed: {format_naira(float(original_amount))} | "
+                        f"Pay: {format_naira(float(agreed_amount))}"
+                    ),
+                }
+            )
+        if not rows:
+            await whatsapp.send_text(phone, "I could not find any inspectable properties ready for payment yet. Please book or complete an inspection first.")
+            return
+        await self.set_state(phone, PAYMENT_SELECT_PROPERTY_STATE)
+        await self.set_data(phone, {**(await self.get_data(phone)), "payment_candidate_ids": [appointment.id for appointment in appointments[:10]]})
+        await whatsapp.send_list(
+            phone,
+            "You have more than one inspected property ready for payment. Please choose the property you want to pay for.",
+            "Choose Property",
+            [{"title": "Inspected Properties", "rows": rows}],
+        )
+
+
+    async def handle_payment_select_property(self, phone, input_value, _message_type, _media_id, user, db, **kwargs):
+        if not input_value:
+            await self._prompt_payment_selection(phone, await self._get_payment_candidates(db, user), db)
+            return
+        if input_value == "back_to_menu":
+            await self.send_main_menu(phone, user)
+            return
+        if not input_value.startswith("pay_appt_"):
+            await whatsapp.send_text(phone, "Please choose one of the inspected properties listed for payment.")
+            return
+        try:
+            appointment_id = int(input_value.split("_")[-1])
+        except ValueError:
+            await whatsapp.send_text(phone, "Please choose one of the inspected properties listed for payment.")
+            return
+        appointment = await db.get(Appointment, appointment_id)
+        if not appointment or appointment.tenant_id != user.id:
+            await whatsapp.send_text(phone, "That inspection booking could not be found on your account.")
+            return
+        prop = await db.get(Property, appointment.property_id)
+        if not prop:
+            await whatsapp.send_text(phone, "That property record is no longer available.")
+            return
+        agreed_amount = appointment.agreed_rent_amount or prop.annual_rent
         if appointment.status != AppointmentStatus.interested:
             appointment.status = AppointmentStatus.interested
             await db.commit()
             await db.refresh(appointment)
-        payment = await payment_service.initialize_rent_payment(db, user, appointment.property_id)
+        payment = await payment_service.initialize_rent_payment(
+            db,
+            user,
+            prop.id,
+            appointment_id=appointment.id,
+            agreed_amount=agreed_amount,
+        )
         await self.set_state(phone, "AWAIT_PAYMENT")
-        await whatsapp.send_text(phone, f"Proceed with your payment here: {payment['payment_url']}")
+        await whatsapp.send_text(
+            phone,
+            (
+                f"You are paying for {prop.title}.\n"
+                f"Listed amount: {format_naira(float(appointment.original_rent_amount or prop.annual_rent))}\n"
+                f"Agreed amount: {format_naira(float(agreed_amount))}\n"
+                f"Checkout: {payment['payment_url']}\n"
+                "Please open the checkout link to complete payment. You will remain in this chat while the payment page loads."
+            ),
+        )
+
+
+    async def _handle_payment_request(self, phone: str, user: User, db: AsyncSession) -> bool:
+        appointments = await self._get_payment_candidates(db, user)
+        if not appointments:
+            await whatsapp.send_text(phone, "I could not find an inspection booking on your account yet. Please book an inspection first, and I will help you make payment right after.")
+            return True
+        if len(appointments) == 1:
+            await self.handle_payment_select_property(phone, f"pay_appt_{appointments[0].id}", "interactive", None, user, db)
+            return True
+        await self._prompt_payment_selection(phone, appointments, db)
         return True
 
 

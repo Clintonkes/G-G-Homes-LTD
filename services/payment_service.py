@@ -7,18 +7,41 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from database.models import Payment, PaymentStatus, PaymentType, Property, PropertyStatus, User
+from database.models import Appointment, AppointmentStatus, Payment, PaymentStatus, PaymentType, Property, PropertyStatus, User
 
 PAYSTACK_BASE_URL = "https://api.paystack.co"
 
 
 class PaymentService:
-    async def initialize_rent_payment(self, db: AsyncSession, tenant: User, property_id: int) -> dict:
+    async def initialize_rent_payment(
+        self,
+        db: AsyncSession,
+        tenant: User,
+        property_id: int,
+        appointment_id: int | None = None,
+        agreed_amount: float | None = None,
+    ) -> dict:
         prop = await db.get(Property, property_id)
         if not prop:
             raise ValueError("Property not found")
 
-        gross_amount = prop.annual_rent
+        if appointment_id is not None:
+            existing_result = await db.execute(
+                select(Payment).where(
+                    Payment.appointment_id == appointment_id,
+                    Payment.status == PaymentStatus.pending,
+                ).order_by(Payment.created_at.desc())
+            )
+            existing_payment = existing_result.scalar_one_or_none()
+            if existing_payment and existing_payment.checkout_url:
+                return {
+                    "payment_url": existing_payment.checkout_url,
+                    "reference": existing_payment.paystack_reference,
+                    "gross_amount": float(existing_payment.gross_amount),
+                }
+
+        quoted_amount = float(prop.annual_rent)
+        gross_amount = float(agreed_amount if agreed_amount is not None else quoted_amount)
         platform_fee = round(gross_amount * settings.TRANSACTION_FEE_PERCENT / 100, 2)
         net_amount = gross_amount - platform_fee
         amount_kobo = int(gross_amount * 100)
@@ -31,7 +54,13 @@ class PaymentService:
                     "email": tenant.email or f"{tenant.phone_number}@rentease.ng",
                     "amount": amount_kobo,
                     "currency": "NGN",
-                    "metadata": {"tenant_id": tenant.id, "property_id": property_id},
+                    "metadata": {
+                        "tenant_id": tenant.id,
+                        "property_id": property_id,
+                        "appointment_id": appointment_id,
+                        "quoted_amount": quoted_amount,
+                        "agreed_amount": gross_amount,
+                    },
                     "callback_url": f"{settings.BASE_URL}/api/v1/payments/callback",
                 },
             )
@@ -41,11 +70,15 @@ class PaymentService:
         payment = Payment(
             payer_id=tenant.id,
             property_id=property_id,
+            appointment_id=appointment_id,
             payment_type=PaymentType.rent,
+            quoted_amount=quoted_amount,
+            agreed_amount=gross_amount,
             gross_amount=gross_amount,
             platform_fee=platform_fee,
             net_amount=net_amount,
             paystack_reference=data["reference"],
+            checkout_url=data.get("authorization_url"),
             status=PaymentStatus.pending,
             tenancy_start_date=datetime.now(timezone.utc),
             tenancy_end_date=datetime.now(timezone.utc) + timedelta(days=365),
@@ -78,6 +111,10 @@ class PaymentService:
             prop = await db.get(Property, payment.property_id)
             if prop:
                 prop.status = PropertyStatus.rented
+            if payment.appointment_id:
+                appointment = await db.get(Appointment, payment.appointment_id)
+                if appointment:
+                    appointment.status = AppointmentStatus.completed
         else:
             payment.status = PaymentStatus.failed
 
