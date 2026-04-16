@@ -55,3 +55,17 @@ class TestIntentService:
         decision = await service.detect_intent("show me houses", "MAIN_MENU")
         assert decision.intent == "list_property"
         assert decision.source == "llm"
+
+    @pytest.mark.asyncio
+    async def test_rule_based_intent_detects_payment_status_check_language(self):
+        service = IntentService()
+        decision = service._rule_based_intent("I have paid already, please check", "MAIN_MENU")
+        assert decision.intent == "status_check"
+        assert decision.source == "rule"
+
+    @pytest.mark.asyncio
+    async def test_rule_based_intent_detects_reopen_checkout_language(self):
+        service = IntentService()
+        decision = service._rule_based_intent("Please send checkout again", "MAIN_MENU")
+        assert decision.intent == "make_payment"
+        assert decision.source == "rule"

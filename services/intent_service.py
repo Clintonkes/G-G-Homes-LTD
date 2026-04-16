@@ -119,6 +119,39 @@ class IntentService:
         normalized = self._normalize_text(message)
         if not normalized:
             return IntentDecision(intent="unknown", confidence=0.0, source="fallback")
+        if self._contains_any(
+            normalized,
+            [
+                "i have paid",
+                "i paid",
+                "have paid",
+                "payment done",
+                "payment made",
+                "i made payment",
+                "did my payment go through",
+                "has my payment gone through",
+                "payment status",
+                "is my payment successful",
+                "was payment successful",
+            ],
+        ):
+            return IntentDecision(intent="status_check", confidence=0.9, source="rule")
+        if self._contains_any(
+            normalized,
+            [
+                "open checkout again",
+                "reopen checkout",
+                "send checkout again",
+                "send payment link again",
+                "payment link again",
+                "open payment link",
+                "continue payment",
+                "resume payment",
+                "pay now",
+                "make payment",
+            ],
+        ):
+            return IntentDecision(intent="make_payment", confidence=0.9, source="rule")
         if current_state != "MAIN_MENU":
             return IntentDecision(intent="continue", confidence=0.55, source="fallback")
         return IntentDecision(intent="unknown", confidence=0.2, source="fallback")

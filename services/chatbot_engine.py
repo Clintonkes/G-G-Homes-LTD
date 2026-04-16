@@ -1254,6 +1254,18 @@ class ChatbotEngine(ChatbotConversationMixin):
                 payable.append(appointment)
         return payable
 
+    async def _get_latest_pending_payment(self, db: AsyncSession, user: User) -> Payment | None:
+        result = await db.execute(
+            select(Payment)
+            .where(
+                Payment.payer_id == user.id,
+                Payment.status == PaymentStatus.pending,
+                Payment.checkout_url.is_not(None),
+            )
+            .order_by(Payment.created_at.desc())
+        )
+        return result.scalars().first()
+
     async def _prompt_payment_selection(self, phone: str, appointments: list[Appointment], db) -> None:
         rows = []
         for appointment in appointments[:10]:
@@ -1342,6 +1354,26 @@ class ChatbotEngine(ChatbotConversationMixin):
 
 
     async def _handle_payment_request(self, phone: str, user: User, db: AsyncSession) -> bool:
+        pending_payment = await self._get_latest_pending_payment(db, user)
+        if pending_payment:
+            prop = await db.get(Property, pending_payment.property_id) if pending_payment.property_id else None
+            property_title = prop.title if prop else "your selected property"
+            await self.set_state(phone, "MAIN_MENU")
+            await self._remember_payment_outcome(
+                phone,
+                status="pending",
+                property_title=property_title,
+                reference=pending_payment.paystack_reference,
+            )
+            await whatsapp.send_text(
+                phone,
+                (
+                    f"You already have a pending checkout for {property_title}.\n"
+                    f"Checkout: {pending_payment.checkout_url}\n"
+                    "Please complete it from the link above. Once payment is verified, we will notify you here."
+                ),
+            )
+            return True
         appointments = await self._get_payment_candidates(db, user)
         if not appointments:
             await whatsapp.send_text(phone, "I could not find an inspection booking on your account yet. Please book an inspection first, and I will help you make payment right after.")

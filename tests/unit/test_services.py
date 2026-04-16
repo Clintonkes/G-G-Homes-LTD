@@ -1246,15 +1246,8 @@ class TestChatbotMediaBatching:
 
         result = await engine._handle_payment_request(tenant.phone_number, tenant, db)
         assert result is True
-
-        await engine.handle_payment_select_property(
-            phone=tenant.phone_number,
-            input_value=f"pay_appt_{appointment.id}",
-            _message_type="interactive",
-            _media_id=None,
-            user=tenant,
-            db=db,
-        )
+        assert "pending checkout" in send_text.await_args.args[1].lower()
+        assert "checkout.example/existing" in send_text.await_args.args[1].lower()
         assert "checkout" in send_text.await_args.args[1].lower()
         assert await engine.get_state(tenant.phone_number) == "MAIN_MENU"
 
