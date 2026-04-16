@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from database.models import Payment, PaymentStatus
+from database.models import Payment, PaymentStatus, Property
 from database.models import User
 from database.schema import PaymentRead
 from database.session import get_db
@@ -28,6 +28,25 @@ def _is_valid_paystack_signature(body: bytes, signature: str | None) -> bool:
         hashlib.sha512,
     ).hexdigest()
     return hmac.compare_digest(expected, signature)
+
+
+async def _notify_payment_outcome(db: AsyncSession, payment: Payment) -> None:
+    tenant = await db.get(User, payment.payer_id)
+    if not tenant:
+        return
+    prop = await db.get(Property, payment.property_id) if payment.property_id else None
+    property_title = prop.title if prop else "your selected property"
+    if payment.status == PaymentStatus.success:
+        message = (
+            f"Your payment for {property_title} has been verified successfully. "
+            f"Reference: {payment.paystack_reference}. Thank you for choosing G & G Homes Ltd."
+        )
+    else:
+        message = (
+            f"We could not verify your payment for {property_title}. "
+            f"Reference: {payment.paystack_reference}. Please try again or ask us to reopen checkout."
+        )
+    await whatsapp.send_text(tenant.phone_number, message)
 
 
 @router.get("/pending-remittances", response_model=list[PaymentRead])
@@ -63,13 +82,8 @@ async def paystack_webhook(request: Request, db: AsyncSession = Depends(get_db))
     payload = await request.json()
     event = payload.get("event")
     reference = payload.get("data", {}).get("reference")
-    if event == "charge.success" and reference:
+    if event in {"charge.success", "charge.failed"} and reference:
         payment = await payment_service.verify_payment(db, reference)
         if payment:
-            tenant = await db.get(User, payment.payer_id)
-            if tenant:
-                await whatsapp.send_text(
-                    tenant.phone_number,
-                    f"Your payment for reference {payment.paystack_reference} has been verified successfully. Thank you for choosing G & G Homes Ltd.",
-                )
+            await _notify_payment_outcome(db, payment)
     return {"status": "ok"}

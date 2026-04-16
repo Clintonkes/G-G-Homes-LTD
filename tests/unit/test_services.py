@@ -1186,9 +1186,10 @@ class TestChatbotMediaBatching:
         checkout.assert_awaited_once()
         assert checkout.await_args.kwargs["appointment_id"] == appointment_one.id
         assert float(checkout.await_args.kwargs["agreed_amount"]) == 220000.0
-        assert await engine.get_state(phone) == "AWAIT_PAYMENT"
+        assert await engine.get_state(phone) == "MAIN_MENU"
         assert "listed amount" in send_text.await_args.args[1].lower()
         assert "checkout.example" in send_text.await_args.args[1].lower()
+        assert "keep chatting with us meanwhile" in send_text.await_args.args[1].lower()
 
     @pytest.mark.asyncio
     async def test_pending_payment_reuses_existing_checkout_url(self, db, monkeypatch):
@@ -1255,6 +1256,48 @@ class TestChatbotMediaBatching:
             db=db,
         )
         assert "checkout" in send_text.await_args.args[1].lower()
+        assert await engine.get_state(tenant.phone_number) == "MAIN_MENU"
+
+    @pytest.mark.asyncio
+    async def test_message_after_checkout_uses_normal_main_menu_flow(self, db, monkeypatch):
+        engine = ChatbotEngine(redis_client=FakeRedis())
+        phone = "2348013333333"
+        user = User(full_name="Buyer Three", phone_number=phone, role=UserRole.tenant)
+        db.add(user)
+        await db.commit()
+
+        await engine.set_state(phone, "MAIN_MENU")
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.mark_as_read", AsyncMock(return_value=True))
+        send_list = AsyncMock(return_value=True)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_list", send_list)
+        monkeypatch.setattr("services.chatbot_engine.whatsapp.send_text", AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            "services.chatbot_engine.intent_service.detect_intent",
+            AsyncMock(return_value=SimpleNamespace(intent="greeting", confidence=0.98, source="llm")),
+        )
+        monkeypatch.setattr(
+            "services.chatbot_engine.conversation_service.generate_reply",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    reply="Hello. How can I help you today?",
+                    action="none",
+                    confidence=0.9,
+                    source="llm",
+                )
+            ),
+        )
+
+        await engine.process_message(
+            phone=phone,
+            message_type="text",
+            text="Hello G",
+            button_id=None,
+            media_id=None,
+            message_id="msg-pay-hello",
+            db=db,
+        )
+
+        assert await engine.get_state(phone) == "MAIN_MENU"
 
     @pytest.mark.asyncio
     async def test_llm_reply_is_saved_in_conversation_history(self, db, monkeypatch):

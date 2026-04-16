@@ -1321,7 +1321,14 @@ class ChatbotEngine(ChatbotConversationMixin):
             appointment_id=appointment.id,
             agreed_amount=agreed_amount,
         )
-        await self.set_state(phone, "AWAIT_PAYMENT")
+        await self.clear_session(phone)
+        await self.set_state(phone, "MAIN_MENU")
+        await self._remember_payment_outcome(
+            phone,
+            status="pending",
+            property_title=prop.title,
+            reference=payment["reference"],
+        )
         await whatsapp.send_text(
             phone,
             (
@@ -1329,7 +1336,7 @@ class ChatbotEngine(ChatbotConversationMixin):
                 f"Listed amount: {format_naira(float(appointment.original_rent_amount or prop.annual_rent))}\n"
                 f"Agreed amount: {format_naira(float(agreed_amount))}\n"
                 f"Checkout: {payment['payment_url']}\n"
-                "Please open the checkout link to complete payment. You will remain in this chat while the payment page loads."
+                "Please open the checkout link to complete payment. Once payment is verified, we will notify you here and you can keep chatting with us meanwhile."
             ),
         )
 
@@ -1347,7 +1354,8 @@ class ChatbotEngine(ChatbotConversationMixin):
 
 
     async def handle_await_payment(self, phone, *_args, **kwargs):
-        await whatsapp.send_text(phone, "Your payment is currently being verified. We will update you as soon as confirmation is received.")
+        await self.set_state(phone, "MAIN_MENU")
+        await whatsapp.send_text(phone, "We will notify you here as soon as your payment update comes in. You can continue chatting with us normally.")
 
 
     async def handle_list_title(self, phone, input_value, *_args, **kwargs):

@@ -121,6 +121,25 @@ class ChatbotConversationMixin:
             },
         )
 
+    async def _remember_payment_outcome(
+        self,
+        phone: str,
+        *,
+        status: str,
+        property_title: str | None = None,
+        reference: str | None = None,
+    ) -> None:
+        await self._set_recent_context(
+            phone,
+            {
+                "kind": "payment_update",
+                "status": status,
+                "property_title": property_title,
+                "reference": reference,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
     async def _get_conversation_history(self, phone: str) -> list[dict]:
         payload = await self.redis.get(self._conversation_history_key(phone))
         if not payload:
@@ -374,6 +393,17 @@ class ChatbotConversationMixin:
         if context_kind == "listing_completion":
             status_text = self._describe_listing_status(recent_context.get("status"))
             summary_text = f"Your recent property listing is {status_text}."
+        elif context_kind == "payment_update":
+            property_title = recent_context.get("property_title") or "your property"
+            reference = recent_context.get("reference")
+            reference_text = f" Reference: {reference}." if reference else ""
+            payment_status = recent_context.get("status")
+            if payment_status == "success":
+                summary_text = f"Your payment for {property_title} was verified successfully.{reference_text}"
+            elif payment_status == "failed":
+                summary_text = f"Your payment for {property_title} did not go through successfully.{reference_text}"
+            else:
+                summary_text = f"Your payment update for {property_title} is still pending.{reference_text}"
         else:
             scheduled_date = recent_context.get("scheduled_date")
             summary_text = "Your recent inspection booking is still confirmed."
