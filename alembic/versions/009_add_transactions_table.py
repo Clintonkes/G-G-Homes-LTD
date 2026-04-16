@@ -16,7 +16,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    transactionstatus = sa.Enum("pending", "success", "failed", "abandoned", name="transactionstatus")
+    transactionstatus = sa.Enum("pending", "success", "failed", "abandoned", name="transactionstatus", create_type=False)
     transactionstatus.create(op.get_bind(), checkfirst=True)
     op.create_table(
         "transactions",
@@ -44,5 +44,5 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_transactions_provider_reference"), table_name="transactions")
     op.drop_index(op.f("ix_transactions_payment_id"), table_name="transactions")
     op.drop_table("transactions")
-    transactionstatus = sa.Enum("pending", "success", "failed", "abandoned", name="transactionstatus")
+    transactionstatus = sa.Enum("pending", "success", "failed", "abandoned", name="transactionstatus", create_type=False)
     transactionstatus.drop(op.get_bind(), checkfirst=True)
